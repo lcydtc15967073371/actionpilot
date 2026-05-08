@@ -19,6 +19,11 @@ local.properties
 *.tar.gz
 *.ap_
 
+# Gradle wrapper (binary, not needed for code review)
+gradle/wrapper/gradle-wrapper.jar
+gradle/wrapper/gradle-wrapper.properties
+gradle/wrapper/*.jar
+
 # Subproject build artifacts
 */build
 */.gradle
