@@ -3,6 +3,7 @@ package com.operit.actionpilot.recorder
 import com.operit.actionpilot.model.MutableOpMap
 import com.operit.actionpilot.model.OpAction
 import com.operit.actionpilot.model.OpEdge
+import com.operit.actionpilot.model.AppSelection
 import com.operit.actionpilot.model.OpMap
 import com.operit.actionpilot.model.OpNode
 
@@ -29,6 +30,8 @@ class MapBuilder {
 
     fun onWindowChanged(appPackage: String, appName: String, screenName: String) {
         if (!_recording) return
+        // Skip if app filter is active and this package is not selected
+        if (AppSelection.isFiltering() && !AppSelection.isSelected(appPackage)) return
 
         val nodeId = nodeId(appPackage, screenName)
         val now = System.currentTimeMillis()

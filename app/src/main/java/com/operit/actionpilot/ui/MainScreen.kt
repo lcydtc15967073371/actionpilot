@@ -16,6 +16,7 @@ import com.operit.actionpilot.model.OpMap
 import com.operit.actionpilot.service.RecordService
 import com.operit.actionpilot.service.ShizukuShell
 import com.operit.actionpilot.storage.MapRepository
+import com.operit.actionpilot.model.AppSelection
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import rikka.shizuku.Shizuku
@@ -66,7 +67,7 @@ fun MainScreen() {
                     selected = selectedTab == 1,
                     onClick = { selectedTab = 1 },
                     icon = { Text("🗺", fontSize = 18.sp) },
-                    label = { Text("地图", fontSize = 12.sp) }
+                    label = { Text("应用", fontSize = 12.sp) }
                 )
                 NavigationBarItem(
                     selected = selectedTab == 2,
@@ -129,7 +130,7 @@ fun MainScreen() {
                         }
                     }
                 )
-                1 -> MapViewTab(opMap = opMap)
+                1 -> AppSelectScreen()
                 2 -> RecordListTab(opMap = opMap)
                 3 -> ExportTab(context = context, repository = repository, opMap = opMap)
             }
@@ -379,18 +380,6 @@ private fun StatItem(label: String, value: String, modifier: Modifier = Modifier
             fontSize = 11.sp,
             color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.7f)
         )
-    }
-}
-
-@Composable
-private fun MapViewTab(opMap: OpMap?) {
-    if (opMap == null || opMap.nodes.isEmpty()) {
-        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Text("暂无数据，请先录制",
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-    } else {
-        MapView(map = opMap)
     }
 }
 
