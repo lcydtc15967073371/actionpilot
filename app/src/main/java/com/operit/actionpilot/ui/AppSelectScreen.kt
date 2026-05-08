@@ -82,7 +82,7 @@ fun AppSelectScreen() {
             Row {
                 TextButton(
                     onClick = {
-                        allApps.forEach { AppSelection.toggle(it.packageName, true) }
+                        AppSelection.selectAll(allApps.map { it.packageName })
                     },
                     contentPadding = PaddingValues(horizontal = 8.dp)
                 ) {

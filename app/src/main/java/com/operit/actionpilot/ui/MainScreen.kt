@@ -116,24 +116,22 @@ fun MainScreen() {
                         } catch (_: Exception) {
                             Toast.makeText(context, "Shizuku 未运行", Toast.LENGTH_SHORT).show()
                         }
-                    },
-                    onEnableA11y = {
-                        scope.launch {
-                            Toast.makeText(context, "正在启用...", Toast.LENGTH_SHORT).show()
-                            val ok = ShizukuShell.enableAccessibilityService()
-                            if (ok) {
-                                Toast.makeText(context, "无障碍已启用！", Toast.LENGTH_SHORT).show()
-                                a11yEnabled = true
-                            } else {
-                                Toast.makeText(context, "失败，请手动设置：设置 → 无障碍", Toast.LENGTH_LONG).show()
-                            }
-                        }
                     }
                 )
                 1 -> AppSelectScreen()
                 2 -> RecordListTab(opMap = opMap)
                 3 -> ExportTab(context = context, repository = repository, opMap = opMap)
             }
+        }
+    }
+
+    // Auto-enable accessibility on startup
+    LaunchedEffect(Unit) {
+        delay(2000)
+        val perm = ShizukuShell.isPermissionGranted()
+        val a11y = RecordService.isA11yServiceEnabled()
+        if (perm && !a11y) {
+            ShizukuShell.enableAccessibilityService()
         }
     }
 
@@ -156,8 +154,7 @@ private fun RecordTab(
     a11yEnabled: Boolean,
     opMap: OpMap?,
     onToggleRecording: (Boolean) -> Unit,
-    onRequestShizuku: () -> Unit,
-    onEnableA11y: () -> Unit
+    onRequestShizuku: () -> Unit
 ) {
     val byPackage = opMap?.nodes?.values?.groupBy { it.appPackage }
     val hasRichMode = a11yEnabled
@@ -205,42 +202,6 @@ private fun RecordTab(
         }
 
         Spacer(Modifier.height(12.dp))
-
-        // 无障碍引导
-        if (!hasRichMode) {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.secondaryContainer
-                )
-            ) {
-                Column(modifier = Modifier.padding(12.dp)) {
-                    Text(
-                        "未启用无障碍，无法记录点击文字",
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 13.sp
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        "可通过下方按钮自动启用，或手动：\n" +
-                                "设置 → 无障碍 → 无障碍快捷与辅助 → 更多已下载的服务",
-                        fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.8f)
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    Button(
-                        onClick = onEnableA11y,
-                        modifier = Modifier.fillMaxWidth().height(40.dp),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = MaterialTheme.colorScheme.tertiary
-                        )
-                    ) {
-                        Text("通过 Shizuku 自动启用", fontSize = 11.sp)
-                    }
-                }
-            }
-            Spacer(Modifier.height(8.dp))
-        }
 
         // 录制中实时统计
         if (recording && opMap != null) {
