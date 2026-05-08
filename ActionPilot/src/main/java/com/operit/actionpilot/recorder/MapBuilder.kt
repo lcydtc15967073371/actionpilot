@@ -28,15 +28,18 @@ class MapBuilder {
         return _map.toImmutable()
     }
 
-    fun onWindowChanged(appPackage: String, appName: String, screenName: String) {
-        if (!_recording) return
+    /**
+     * @return true if the window change was applied, false if skipped (dedup/filtered)
+     */
+    fun onWindowChanged(appPackage: String, appName: String, screenName: String): Boolean {
+        if (!_recording) return false
         // Skip if app filter is active and this package is not selected
-        if (AppSelection.isFiltering() && !AppSelection.isSelected(appPackage)) return
+        if (AppSelection.isFiltering() && !AppSelection.isSelected(appPackage)) return false
 
         val nodeId = nodeId(appPackage, screenName)
 
         // Dedup: A11y + Shizuku both report the same transition
-        if (nodeId == _map.currentId) return
+        if (nodeId == _map.currentId) return false
         val now = System.currentTimeMillis()
         val prevId = _map.currentId
 
@@ -103,6 +106,7 @@ class MapBuilder {
 
         _map.currentId = nodeId
         _map.totalActions++
+        return true
     }
 
     fun onAction(actionType: String, elementLabel: String, viewId: String = "") {

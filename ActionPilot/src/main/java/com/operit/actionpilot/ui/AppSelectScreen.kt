@@ -189,65 +189,59 @@ private fun loadInstalledApps(context: Context): List<AppInfo> {
     val pm = context.packageManager
     val allApps = mutableMapOf<String, String>()
 
-    // Method 1: PackageManager.getInstalledApplications (with QUERY_ALL_PACKAGES)
+    // Method 1: Shizuku cmd package list (no Android permission needed)
     try {
-        val flags = if (android.os.Build.VERSION.SDK_INT >= 33)
-            android.content.pm.PackageManager.ApplicationInfoFlags.of(0)
-        else null
-        val infos = if (flags != null)
-            pm.getInstalledApplications(flags)
-        else
-            @Suppress("DEPRECATION") pm.getInstalledApplications(0)
-        for (info in infos) {
-            // Skip system apps
-            if (info.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM != 0) continue
-            val label = info.loadLabel(pm)?.toString() ?: info.packageName
-            if (info.packageName !in allApps) allApps[info.packageName] = label
-        }
-    } catch (_: Exception) {
-        // fallback to Shizuku method
-    }
-
-    // Method 2: Shizuku cmd package list (fallback)
-    if (allApps.size < 20) {
-        try {
-            val cmdPkg = ShizukuShell.exec("cmd package list packages -3 --user 0")
-            val lines = cmdPkg.lines()
-                .map { it.trim() }
-                .filter { it.startsWith("package:") }
-                .map { it.removePrefix("package:") }
-                .filter { it.isNotBlank() }
-            for (pkg in lines) {
-                if (pkg !in allApps) {
-                    try {
-                        val info = pm.getApplicationInfo(pkg, 0)
-                        val label = info.loadLabel(pm).toString()
-                        allApps[pkg] = label
-                    } catch (_: Exception) {
-                        allApps[pkg] = pkg
-                    }
-                }
+        val cmdPkg = ShizukuShell.exec("cmd package list packages -3 --user 0")
+        val lines = cmdPkg.lines()
+            .map { it.trim() }
+            .filter { it.startsWith("package:") }
+            .map { it.removePrefix("package:") }
+            .filter { it.isNotBlank() }
+        for (pkg in lines) {
+            val label = try {
+                val info = pm.getApplicationInfo(pkg, 0)
+                info.loadLabel(pm).toString()
+            } catch (_: Exception) {
+                pkg
             }
-        } catch (_: Exception) {}
-    }
+            allApps[pkg] = label
+        }
+    } catch (_: Exception) {}
 
-    // Method 3: Shizuku ls /data/app (last resort)
+    // Method 2: Shizuku ls /data/app (backup)
     if (allApps.size < 30) {
         try {
             val dataApp = ShizukuShell.exec("ls -1 /data/app/")
             val lines = dataApp.lines().map { it.trim() }.filter { it.isNotBlank() }
             for (entry in lines) {
-                // format: com.tencent.mm-xyz== or com.tencent.mm-1
                 val pkg = entry.substringBefore('-').substringBefore("==")
                 if (pkg.isNotBlank() && pkg !in allApps) {
-                    try {
+                    val label = try {
                         val info = pm.getApplicationInfo(pkg, 0)
-                        val label = info.loadLabel(pm).toString()
-                        allApps[pkg] = label
+                        info.loadLabel(pm).toString()
                     } catch (_: Exception) {
-                        allApps[pkg] = pkg
+                        pkg
                     }
+                    allApps[pkg] = label
                 }
+            }
+        } catch (_: Exception) {}
+    }
+
+    // Method 3: PackageManager fallback (only if Shizuku failed)
+    if (allApps.isEmpty()) {
+        try {
+            val flags = if (android.os.Build.VERSION.SDK_INT >= 33)
+                android.content.pm.PackageManager.ApplicationInfoFlags.of(0)
+            else null
+            val infos = if (flags != null)
+                pm.getInstalledApplications(flags)
+            else
+                @Suppress("DEPRECATION") pm.getInstalledApplications(0)
+            for (info in infos) {
+                if (info.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM != 0) continue
+                val label = info.loadLabel(pm)?.toString() ?: info.packageName
+                if (info.packageName !in allApps) allApps[info.packageName] = label
             }
         } catch (_: Exception) {}
     }

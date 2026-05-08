@@ -17,6 +17,9 @@ class RecordAccessibilityService : AccessibilityService() {
             private set
     }
 
+    private var lastContentTime = 0L
+    private var lastContentText = ""
+
     override fun onServiceConnected() {
         super.onServiceConnected()
         isRunning = true
@@ -25,6 +28,7 @@ class RecordAccessibilityService : AccessibilityService() {
                     AccessibilityEvent.TYPE_VIEW_LONG_CLICKED or
                     AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED or
                     AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or
+                    AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED or
                     AccessibilityEvent.TYPE_VIEW_SELECTED or
                     AccessibilityEvent.TYPE_VIEW_FOCUSED
             feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
@@ -48,8 +52,18 @@ class RecordAccessibilityService : AccessibilityService() {
                     val screen = event.className?.toString()
                         ?.substringAfterLast('.')?.substringBefore('$') ?: "unknown"
                     val appName = resolveAppName(pkg)
-                    builder.onWindowChanged(pkg, appName, screen)
-                    Log.d(TAG, "Window: $appName/$screen")
+                    val changed = builder.onWindowChanged(pkg, appName, screen)
+                    if (changed) {
+                        lastContentTime = 0 // reset throttle, force capture
+                        captureScreenContent(builder)
+                        Log.d(TAG, "Window: $appName/$screen")
+                    }
+                }
+
+                AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> {
+                    // Throttle: only capture content at most once every 2s for same-window changes
+                    if (System.currentTimeMillis() - lastContentTime < 2000) return
+                    captureScreenContent(builder)
                 }
 
                 AccessibilityEvent.TYPE_VIEW_CLICKED -> {
@@ -91,6 +105,54 @@ class RecordAccessibilityService : AccessibilityService() {
     override fun onDestroy() {
         isRunning = false
         super.onDestroy()
+    }
+
+    /**
+     * Traverse the active window's view hierarchy and collect all visible text.
+     * Used to capture "what's on screen" even when the user doesn't click anything.
+     */
+    private fun captureVisibleText(): String {
+        val root = try {
+            rootInActiveWindow
+        } catch (_: Exception) {
+            null
+        } ?: return ""
+
+        try {
+            val texts = linkedSetOf<String>()
+            collectVisibleText(root, texts, 0)
+            return texts.joinToString(" | ").take(5000)
+        } finally {
+            root.recycle()
+        }
+    }
+
+    private fun collectVisibleText(node: AccessibilityNodeInfo, texts: MutableSet<String>, depth: Int) {
+        if (depth > 25 || node == null) return
+        if (!node.isVisibleToUser) return
+
+        // Collect text from this node
+        node.text?.toString()?.trim()?.takeIf { it.length >= 2 }?.let { texts.add(it) }
+        node.contentDescription?.toString()?.trim()?.takeIf { it.length >= 2 }?.let { texts.add(it) }
+
+        // Recurse children
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            collectVisibleText(child, texts, depth + 1)
+            child.recycle()
+        }
+    }
+
+    /**
+     * Capture visible screen content and record it if different from last capture.
+     */
+    private fun captureScreenContent(builder: MapBuilder) {
+        val content = captureVisibleText()
+        if (content.isNotBlank() && content != lastContentText) {
+            builder.onAction("SCREEN_CONTENT", content)
+            lastContentText = content
+            lastContentTime = System.currentTimeMillis()
+        }
     }
 
     private fun resolveAppName(pkg: String): String {
