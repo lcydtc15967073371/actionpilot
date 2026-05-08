@@ -1,0 +1,126 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:padding="8dp">
+
+    <LinearLayout
+        android:id="@+id/drag_handle"
+        android:layout_width="match_parent"
+        android:layout_height="30dp"
+        android:gravity="center"
+        android:orientation="horizontal">
+
+        <View
+            android:layout_width="0dp"
+            android:layout_height="1dp"
+            android:layout_weight="1" />
+
+        <ImageButton
+            android:id="@+id/btn_close"
+            android:layout_width="28dp"
+            android:layout_height="28dp"
+            android:scaleType="fitCenter"
+            android:src="@drawable/ic_close"
+            android:layout_gravity="end"
+            android:contentDescription="关闭" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:background="#1AFFFFFF"
+        android:padding="4dp">
+
+        <EditText
+            android:id="@+id/input_cmd"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:textSize="15sp"
+            android:textColor="#FFFFFF"
+            android:textColorHint="#88FFFFFF"
+            android:hint="输入命令..."
+            android:singleLine="true"
+            android:imeOptions="actionGo"
+            android:background="@android:color/transparent" />
+
+        <ImageButton
+            android:id="@+id/btn_exec"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:scaleType="fitCenter"
+            android:src="@drawable/ic_run" />
+    </LinearLayout>
+
+    <ScrollView
+        android:id="@+id/output_scroll"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:maxHeight="180dp">
+
+        <TextView
+            android:id="@+id/output_text"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textSize="13sp"
+            android:textColor="#CCFFCC"
+            android:lineSpacingExtra="3dp"
+            android:padding="6dp" />
+    </ScrollView>
+
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:layout_marginVertical="4dp"
+        android:background="#44FFFFFF" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical">
+
+        <EditText
+            android:id="@+id/cmd_name_input"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:textSize="13sp"
+            android:textColor="#FFFFFF"
+            android:textColorHint="#66FFFFFF"
+            android:hint="名称"
+            android:singleLine="true"
+            android:background="@android:color/transparent" />
+
+        <EditText
+            android:id="@+id/cmd_content_input"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1.5"
+            android:textSize="13sp"
+            android:textColor="#FFFFFF"
+            android:textColorHint="#66FFFFFF"
+            android:hint="命令"
+            android:singleLine="true"
+            android:background="@android:color/transparent"
+            android:imeOptions="actionDone" />
+
+        <ImageButton
+            android:id="@+id/btn_save_cmd"
+            android:layout_width="28dp"
+            android:layout_height="28dp"
+            android:scaleType="fitCenter"
+            android:src="@drawable/ic_plus"
+            android:contentDescription="保存" />
+    </LinearLayout>
+
+    <ListView
+        android:id="@+id/cmd_list"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content" />
+
+</LinearLayout>
