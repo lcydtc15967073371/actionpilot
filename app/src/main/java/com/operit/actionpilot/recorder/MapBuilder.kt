@@ -34,6 +34,9 @@ class MapBuilder {
         if (AppSelection.isFiltering() && !AppSelection.isSelected(appPackage)) return
 
         val nodeId = nodeId(appPackage, screenName)
+
+        // Dedup: A11y + Shizuku both report the same transition
+        if (nodeId == _map.currentId) return
         val now = System.currentTimeMillis()
         val prevId = _map.currentId
 
@@ -67,7 +70,13 @@ class MapBuilder {
                 )
             } else {
                 // Use last click label as transition trigger if within 1.5s
-                val label = if (now - _lastClickTime < 1500) _lastClickLabel else ""
+                // Consume after first use to prevent mislabeling subsequent transitions
+                val label = if (now - _lastClickTime < 1500) {
+                    val lbl = _lastClickLabel
+                    _lastClickLabel = ""
+                    _lastClickTime = 0L
+                    lbl
+                } else ""
                 _map.edges.add(
                     OpEdge(
                         fromId = prevId,

@@ -123,8 +123,9 @@ class RecordService : Service() {
                         if (parts.size >= 2) {
                             val pkg = parts[0]
                             val activity = parts[1].substringAfterLast('.')
-                            builder.onWindowChanged(pkg, pkg, activity)
-                            Log.e(TAG, "Window (Shizuku): $pkg/$activity")
+                            val appName = resolveAppName(pkg)
+                            builder.onWindowChanged(pkg, appName, activity)
+                            Log.e(TAG, "Window (Shizuku): $appName/$activity")
                         }
                     }
                 } catch (e: Exception) {
@@ -134,6 +135,15 @@ class RecordService : Service() {
                 // Poll less frequently when A11y service is active (it handles window changes)
                 delay(if (RecordAccessibilityService.isRunning) 1500 else 500)
             }
+        }
+    }
+
+    private fun resolveAppName(pkg: String): String {
+        return try {
+            val ai = packageManager.getApplicationInfo(pkg, 0)
+            packageManager.getApplicationLabel(ai).toString()
+        } catch (e: Exception) {
+            pkg
         }
     }
 

@@ -47,8 +47,9 @@ class RecordAccessibilityService : AccessibilityService() {
                     val pkg = event.packageName?.toString() ?: return
                     val screen = event.className?.toString()
                         ?.substringAfterLast('.')?.substringBefore('$') ?: "unknown"
-                    builder.onWindowChanged(pkg, pkg, screen)
-                    Log.d(TAG, "Window: $pkg/$screen")
+                    val appName = resolveAppName(pkg)
+                    builder.onWindowChanged(pkg, appName, screen)
+                    Log.d(TAG, "Window: $appName/$screen")
                 }
 
                 AccessibilityEvent.TYPE_VIEW_CLICKED -> {
@@ -90,6 +91,15 @@ class RecordAccessibilityService : AccessibilityService() {
     override fun onDestroy() {
         isRunning = false
         super.onDestroy()
+    }
+
+    private fun resolveAppName(pkg: String): String {
+        return try {
+            val ai = packageManager.getApplicationInfo(pkg, 0)
+            packageManager.getApplicationLabel(ai).toString()
+        } catch (e: Exception) {
+            pkg
+        }
     }
 
     /**
