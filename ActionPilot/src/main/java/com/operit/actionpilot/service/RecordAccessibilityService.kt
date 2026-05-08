@@ -19,6 +19,9 @@ class RecordAccessibilityService : AccessibilityService() {
 
     private var lastContentTime = 0L
     private var lastContentText = ""
+    private var lastPageLabel = ""
+    private var currentAppPkg = ""
+    private var currentAppName = ""
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -52,17 +55,20 @@ class RecordAccessibilityService : AccessibilityService() {
                     val screen = event.className?.toString()
                         ?.substringAfterLast('.')?.substringBefore('$') ?: "unknown"
                     val appName = resolveAppName(pkg)
+                    currentAppPkg = pkg
+                    currentAppName = appName
                     val changed = builder.onWindowChanged(pkg, appName, screen)
                     if (changed) {
-                        lastContentTime = 0 // reset throttle, force capture
+                        lastContentTime = 0
+                        lastPageLabel = "" // new Activity, reset virtual page tracking
                         captureScreenContent(builder)
                         Log.d(TAG, "Window: $appName/$screen")
                     }
                 }
 
                 AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> {
-                    // Throttle: only capture content at most once every 2s for same-window changes
-                    if (System.currentTimeMillis() - lastContentTime < 2000) return
+                    // Throttle: at most once per second for same-window changes
+                    if (System.currentTimeMillis() - lastContentTime < 1000) return
                     captureScreenContent(builder)
                 }
 
@@ -70,6 +76,10 @@ class RecordAccessibilityService : AccessibilityService() {
                     val (label, viewId) = extractClickInfo(event)
                     if (label.isNotBlank()) {
                         builder.onAction("CLICK", label, viewId)
+                        // Capture content after click in case page changed within same Activity
+                        if (System.currentTimeMillis() - lastContentTime >= 800) {
+                            captureScreenContent(builder)
+                        }
                         Log.d(TAG, "Click: '$label' ($viewId)")
                     }
                 }
@@ -145,10 +155,22 @@ class RecordAccessibilityService : AccessibilityService() {
 
     /**
      * Capture visible screen content and record it if different from last capture.
+     * Creates virtual sub-page nodes when the page title changes within the same Activity.
      */
     private fun captureScreenContent(builder: MapBuilder) {
         val content = captureVisibleText()
         if (content.isNotBlank() && content != lastContentText) {
+            // Extract page title from first meaningful text item
+            val pageLabel = content.split(" | ").firstOrNull()
+                ?.takeIf { it.length in 2..30 } ?: ""
+
+            // Create virtual content page when page title changes within an Activity
+            if (pageLabel.isNotBlank() && pageLabel != lastPageLabel && currentAppPkg.isNotBlank()) {
+                val pageId = "${currentAppPkg}#virtual:$pageLabel"
+                builder.onContentPage(currentAppPkg, currentAppName, pageLabel, pageId)
+                lastPageLabel = pageLabel
+            }
+
             builder.onAction("SCREEN_CONTENT", content)
             lastContentText = content
             lastContentTime = System.currentTimeMillis()

@@ -16,7 +16,6 @@ import com.operit.actionpilot.model.OpMap
 import com.operit.actionpilot.service.RecordService
 import com.operit.actionpilot.service.ShizukuShell
 import com.operit.actionpilot.storage.MapRepository
-import com.operit.actionpilot.model.AppSelection
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import rikka.shizuku.Shizuku
@@ -66,18 +65,12 @@ fun MainScreen() {
                 NavigationBarItem(
                     selected = selectedTab == 1,
                     onClick = { selectedTab = 1 },
-                    icon = { Text("🗺", fontSize = 18.sp) },
-                    label = { Text("应用", fontSize = 12.sp) }
-                )
-                NavigationBarItem(
-                    selected = selectedTab == 2,
-                    onClick = { selectedTab = 2 },
                     icon = { Text("📋", fontSize = 18.sp) },
                     label = { Text("列表", fontSize = 12.sp) }
                 )
                 NavigationBarItem(
-                    selected = selectedTab == 3,
-                    onClick = { selectedTab = 3 },
+                    selected = selectedTab == 2,
+                    onClick = { selectedTab = 2 },
                     icon = { Text("📤", fontSize = 18.sp) },
                     label = { Text("导出", fontSize = 12.sp) }
                 )
@@ -118,9 +111,8 @@ fun MainScreen() {
                         }
                     }
                 )
-                1 -> AppSelectScreen()
-                2 -> RecordListTab(opMap = opMap)
-                3 -> ExportTab(context = context, repository = repository, opMap = opMap)
+                1 -> RecordListTab(opMap = opMap)
+                2 -> ExportTab(context = context, repository = repository, opMap = opMap)
             }
         }
     }
