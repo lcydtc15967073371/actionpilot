@@ -2,6 +2,7 @@ package com.operit.actionpilot.service
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
+import android.graphics.Rect
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
@@ -73,14 +74,14 @@ class RecordAccessibilityService : AccessibilityService() {
                 }
 
                 AccessibilityEvent.TYPE_VIEW_CLICKED -> {
-                    val (label, viewId) = extractClickInfo(event)
+                    val (label, viewInfo) = extractClickInfo(event)
                     if (label.isNotBlank()) {
-                        builder.onAction("CLICK", label, viewId)
+                        builder.onAction("CLICK", label, viewInfo)
                         // Capture content after click in case page changed within same Activity
                         if (System.currentTimeMillis() - lastContentTime >= 800) {
                             captureScreenContent(builder)
                         }
-                        Log.d(TAG, "Click: '$label' ($viewId)")
+                        Log.d(TAG, "Click: '$label' $viewInfo")
                     }
                 }
 
@@ -191,14 +192,27 @@ class RecordAccessibilityService : AccessibilityService() {
      * Priority: contentDescription -> text -> hintText -> viewId resource name -> child text
      */
     private fun extractClickInfo(event: AccessibilityEvent): Pair<String, String> {
-        // First try event text (often contains button label)
-        val eventText = event.text?.joinToString(" ")?.takeIf { it.isNotBlank() }
-        if (eventText != null) return eventText to ""
+        val source = event.source
 
-        val source = event.source ?: return "" to ""
-        val label = extractBestLabel(source)
-        val viewId = source.viewIdResourceName ?: ""
-        return label to viewId
+        // Extract label
+        val eventText = event.text?.joinToString(" ")?.takeIf { it.isNotBlank() }
+        val label = if (eventText != null) eventText
+            else (source?.let { extractBestLabel(it) }) ?: ""
+
+        // Extract bounds from source node (always, for spatial analysis)
+        var viewInfo = ""
+        if (source != null) {
+            val bounds = Rect()
+            source.getBoundsInScreen(bounds)
+            if (!bounds.isEmpty) {
+                viewInfo = "bounds:${bounds.left},${bounds.top},${bounds.right},${bounds.bottom}"
+            }
+            val viewId = source.viewIdResourceName
+            if (!viewId.isNullOrBlank()) {
+                viewInfo += if (viewInfo.isNotBlank()) " | $viewId" else viewId
+            }
+        }
+        return label to viewInfo
     }
 
     private fun extractBestLabel(node: AccessibilityNodeInfo): String {
