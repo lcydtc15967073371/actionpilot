@@ -18,3 +18,11 @@ local.properties
 *.zip
 *.tar.gz
 *.ap_
+
+# Subproject build artifacts
+*/build
+*/.gradle
+*/gradle/wrapper/gradle-wrapper.jar
+*/gradle/wrapper/gradle-wrapper.properties
+*/.backup
+*/.operit
