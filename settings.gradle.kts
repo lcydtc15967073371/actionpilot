@@ -23,4 +23,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "ActionPilot"
-include(":app")
+include(":ActionPilot")
