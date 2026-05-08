@@ -1,6 +1,7 @@
 package com.operit.actionpilot.recorder
 
 import com.operit.actionpilot.model.MutableOpMap
+import com.operit.actionpilot.model.OpAction
 import com.operit.actionpilot.model.OpEdge
 import com.operit.actionpilot.model.OpMap
 import com.operit.actionpilot.model.OpNode
@@ -9,12 +10,16 @@ class MapBuilder {
 
     private var _map = MutableOpMap()
     private var _recording = false
+    private var _lastClickLabel = ""
+    private var _lastClickTime = 0L
 
     val recording: Boolean get() = _recording
 
     fun start() {
         _map = MutableOpMap(startedAt = System.currentTimeMillis())
         _recording = true
+        _lastClickLabel = ""
+        _lastClickTime = 0L
     }
 
     fun stop(): OpMap {
@@ -29,6 +34,7 @@ class MapBuilder {
         val now = System.currentTimeMillis()
         val prevId = _map.currentId
 
+        // Update or create node
         val existing = _map.nodes[nodeId]
         _map.nodes[nodeId] = if (existing != null) {
             existing.copy(
@@ -47,6 +53,7 @@ class MapBuilder {
             )
         }
 
+        // Record transition edge from previous screen
         if (prevId != null && prevId != nodeId) {
             val existingEdge = _map.edges.find { it.fromId == prevId && it.toId == nodeId }
             val idx = _map.edges.indexOf(existingEdge)
@@ -56,12 +63,14 @@ class MapBuilder {
                     lastTime = now
                 )
             } else {
+                // Use last click label as transition trigger if within 1.5s
+                val label = if (now - _lastClickTime < 1500) _lastClickLabel else ""
                 _map.edges.add(
                     OpEdge(
                         fromId = prevId,
                         toId = nodeId,
-                        actionType = "TRANSITION",
-                        elementLabel = "",
+                        actionType = "CLICK",
+                        elementLabel = label,
                         count = 1,
                         lastTime = now
                     )
@@ -69,23 +78,40 @@ class MapBuilder {
             }
         }
 
+        // Record transition action
+        _map.actions.add(
+            OpAction(
+                nodeId = prevId ?: nodeId,
+                actionType = "TRANSITION",
+                elementLabel = "${appName}/${screenName}",
+                viewId = "",
+                timestamp = now
+            )
+        )
+
         _map.currentId = nodeId
+        _map.totalActions++
     }
 
-    fun onAction(actionType: String, elementLabel: String) {
+    fun onAction(actionType: String, elementLabel: String, viewId: String = "") {
         if (!_recording) return
+        val now = System.currentTimeMillis()
         _map.totalActions++
-        if (_map.currentId == null) return
 
-        if (_map.edges.isNotEmpty()) {
-            val last = _map.edges.last()
-            if (last.actionType == "TRANSITION" || last.lastTime == System.currentTimeMillis()) {
-                val idx = _map.edges.size - 1
-                _map.edges[idx] = last.copy(
-                    actionType = actionType,
-                    elementLabel = elementLabel
-                )
-            }
+        _map.actions.add(
+            OpAction(
+                nodeId = _map.currentId ?: "",
+                actionType = actionType,
+                elementLabel = elementLabel,
+                viewId = viewId,
+                timestamp = now
+            )
+        )
+
+        // Remember last click label for potential transition correlation
+        if (actionType == "CLICK" || actionType == "LONG_CLICK") {
+            _lastClickLabel = elementLabel
+            _lastClickTime = now
         }
     }
 

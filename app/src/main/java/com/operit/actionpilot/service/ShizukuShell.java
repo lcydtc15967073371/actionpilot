@@ -70,6 +70,20 @@ public class ShizukuShell {
     }
 
     /**
+     * Enable our AccessibilityService via Shizuku (settings put secure).
+     * Requires Shizuku running in ADB or root mode.
+     */
+    public static boolean enableAccessibilityService() {
+        String component = "com.operit.actionpilot/com.operit.actionpilot.service.RecordAccessibilityService";
+        // Set service directly (don't append, as current list is null)
+        exec("settings put secure enabled_accessibility_services \"" + component + "\"");
+        exec("settings put secure accessibility_enabled 1");
+        // Verify
+        String check = exec("settings get secure enabled_accessibility_services");
+        return check != null && check.contains("com.operit.actionpilot");
+    }
+
+    /**
      * Execute a shell command via Shizuku.
      * Returns stdout output.
      */

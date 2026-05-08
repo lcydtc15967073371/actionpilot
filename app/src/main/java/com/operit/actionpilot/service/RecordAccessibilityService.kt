@@ -1,32 +1,39 @@
 package com.operit.actionpilot.service
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.AccessibilityServiceInfo
+import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
-import android.util.Log
 import com.operit.actionpilot.recorder.MapBuilder
 
-/**
- * Optional AccessibilityService that provides click-level recording detail.
- * Works alongside RecordService (Shizuku polling) for enhanced data.
- *
- * Safe design: START_NOT_STICKY, no auto-start, no overlay, only low-frequency events.
- */
 class RecordAccessibilityService : AccessibilityService() {
 
     companion object {
         const val TAG = "ActionPilot-A11y"
 
-        /**
-         * Set by MainActivity when user enables enhanced recording.
-         * The MapBuilder from RecordService is shared here.
-         */
         var mapBuilder: MapBuilder? = null
+        var isRunning: Boolean = false
+            private set
     }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
-        Log.d(TAG, "AccessibilityService connected (enhanced recording)")
+        isRunning = true
+        val info = AccessibilityServiceInfo().apply {
+            eventTypes = AccessibilityEvent.TYPE_VIEW_CLICKED or
+                    AccessibilityEvent.TYPE_VIEW_LONG_CLICKED or
+                    AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED or
+                    AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or
+                    AccessibilityEvent.TYPE_VIEW_SELECTED or
+                    AccessibilityEvent.TYPE_VIEW_FOCUSED
+            feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
+            flags = AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
+                    AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
+            notificationTimeout = 100
+        }
+        this.serviceInfo = info
+        Log.d(TAG, "AccessibilityService connected (rich recording mode)")
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -34,31 +41,95 @@ class RecordAccessibilityService : AccessibilityService() {
         val builder = mapBuilder ?: return
         if (!builder.recording) return
 
-        when (event.eventType) {
-            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
-                val pkg = event.packageName?.toString() ?: return
-                val screen = event.className?.toString()
-                    ?.substringAfterLast('.')?.substringBefore('$') ?: "unknown"
-                builder.onWindowChanged(pkg, pkg, screen)
-            }
+        try {
+            when (event.eventType) {
+                AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
+                    val pkg = event.packageName?.toString() ?: return
+                    val screen = event.className?.toString()
+                        ?.substringAfterLast('.')?.substringBefore('$') ?: "unknown"
+                    builder.onWindowChanged(pkg, pkg, screen)
+                    Log.d(TAG, "Window: $pkg/$screen")
+                }
 
-            AccessibilityEvent.TYPE_VIEW_CLICKED -> {
-                val label = extractLabel(event.source) ?: ""
-                builder.onAction("CLICK", label)
-                event.source?.recycle()
+                AccessibilityEvent.TYPE_VIEW_CLICKED -> {
+                    val (label, viewId) = extractClickInfo(event)
+                    if (label.isNotBlank()) {
+                        builder.onAction("CLICK", label, viewId)
+                        Log.d(TAG, "Click: '$label' ($viewId)")
+                    }
+                }
+
+                AccessibilityEvent.TYPE_VIEW_LONG_CLICKED -> {
+                    val (label, viewId) = extractClickInfo(event)
+                    if (label.isNotBlank()) {
+                        builder.onAction("LONG_CLICK", label, viewId)
+                        Log.d(TAG, "LongClick: '$label' ($viewId)")
+                    }
+                }
+
+                AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED -> {
+                    val text = event.text?.joinToString("")?.trim()
+                    if (!text.isNullOrBlank()) {
+                        builder.onAction("TEXT_INPUT", text, "")
+                        Log.d(TAG, "TextInput: '$text'")
+                    }
+                }
             }
+        } catch (e: Exception) {
+            Log.e(TAG, "Event error: ${e.message}")
+        } finally {
+            event.source?.recycle()
         }
     }
 
     override fun onInterrupt() {
         Log.d(TAG, "AccessibilityService interrupted")
+        isRunning = false
     }
 
-    private fun extractLabel(source: AccessibilityNodeInfo?): String? {
-        if (source == null) return null
-        source.text?.toString()?.takeIf { it.isNotBlank() }?.let { return it }
-        source.contentDescription?.toString()?.takeIf { it.isNotBlank() }?.let { return it }
-        source.viewIdResourceName?.let { return it.substringAfterLast('/') }
-        return null
+    override fun onDestroy() {
+        isRunning = false
+        super.onDestroy()
+    }
+
+    /**
+     * Extract click label and viewId from an accessibility event.
+     * Priority: contentDescription -> text -> hintText -> viewId resource name -> child text
+     */
+    private fun extractClickInfo(event: AccessibilityEvent): Pair<String, String> {
+        // First try event text (often contains button label)
+        val eventText = event.text?.joinToString(" ")?.takeIf { it.isNotBlank() }
+        if (eventText != null) return eventText to ""
+
+        val source = event.source ?: return "" to ""
+        val label = extractBestLabel(source)
+        val viewId = source.viewIdResourceName ?: ""
+        return label to viewId
+    }
+
+    private fun extractBestLabel(node: AccessibilityNodeInfo): String {
+        // 1. contentDescription (primary accessibility label)
+        node.contentDescription?.toString()?.takeIf { it.isNotBlank() }?.let { return it }
+        // 2. text (visible button text)
+        node.text?.toString()?.takeIf { it.isNotBlank() }?.let { return it }
+        // 3. hintText (for input fields)
+        node.hintText?.toString()?.takeIf { it.isNotBlank() }?.let { return it }
+        // 4. viewId resource name (last resort)
+        node.viewIdResourceName?.let { return it.substringAfterLast('/') }
+        // 5. Check children for text
+        for (i in 0 until node.childCount) {
+            node.getChild(i)?.let { child ->
+                child.text?.toString()?.takeIf { it.isNotBlank() }?.let {
+                    child.recycle()
+                    return it
+                }
+                child.contentDescription?.toString()?.takeIf { it.isNotBlank() }?.let {
+                    child.recycle()
+                    return it
+                }
+                child.recycle()
+            }
+        }
+        return ""
     }
 }

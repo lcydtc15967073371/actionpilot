@@ -8,7 +8,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
@@ -35,47 +34,44 @@ fun ExportScreen(
             .verticalScroll(rememberScrollState())
     ) {
         Text(
-            "AI Export",
+            "导出数据",
             fontWeight = FontWeight.Bold,
             fontSize = 18.sp
         )
 
         Spacer(Modifier.height(16.dp))
 
-        // Save current map
         Button(
             onClick = {
                 if (currentMap != null) {
                     repository.save(currentMap)
-                    Toast.makeText(context, "Map saved", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, "已保存", Toast.LENGTH_SHORT).show()
                 }
             },
             modifier = Modifier.fillMaxWidth(),
             enabled = currentMap != null
         ) {
-            Text("Save Current Map")
+            Text("保存当前数据")
         }
 
         Spacer(Modifier.height(8.dp))
 
-        // Export for AI
         Button(
             onClick = {
                 val map = currentMap ?: repository.load()
                 if (map != null) {
                     exportedJson = AiExporter().export(map)
                 } else {
-                    Toast.makeText(context, "No data to export", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, "暂无数据可导出", Toast.LENGTH_SHORT).show()
                 }
             },
             modifier = Modifier.fillMaxWidth()
         ) {
-            Text("Generate AI Export")
+            Text("生成导出 JSON")
         }
 
         Spacer(Modifier.height(8.dp))
 
-        // Share
         if (exportedJson.isNotEmpty()) {
             Button(
                 onClick = {
@@ -99,15 +95,14 @@ fun ExportScreen(
                     containerColor = MaterialTheme.colorScheme.secondary
                 )
             ) {
-                Text("Share JSON")
+                Text("分享 JSON")
             }
         }
 
         Spacer(Modifier.height(16.dp))
 
-        // JSON preview
         if (exportedJson.isNotEmpty()) {
-            Text("Preview:", fontWeight = FontWeight.Bold)
+            Text("预览:", fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(8.dp))
             Card(
                 modifier = Modifier.fillMaxWidth(),

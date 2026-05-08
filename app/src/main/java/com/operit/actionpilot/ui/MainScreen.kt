@@ -33,8 +33,8 @@ fun MainScreen() {
     var recording by remember { mutableStateOf(RecordService.isRunning) }
     var opMap by remember { mutableStateOf<OpMap?>(null) }
     var shizukuPerm by remember { mutableStateOf(ShizukuShell.isPermissionGranted()) }
+    var a11yEnabled by remember { mutableStateOf(RecordService.isA11yServiceEnabled()) }
 
-    // Load data: use live MapBuilder data when recording, else load from disk
     fun refreshData() {
         opMap = if (recording && RecordService.mapBuilder != null) {
             RecordService.mapBuilder!!.getSnapshot()
@@ -48,7 +48,7 @@ fun MainScreen() {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("ActionPilot") },
+                title = { Text("操作导航") },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.primaryContainer
                 )
@@ -60,25 +60,25 @@ fun MainScreen() {
                     selected = selectedTab == 0,
                     onClick = { selectedTab = 0 },
                     icon = { Text("🎯", fontSize = 18.sp) },
-                    label = { Text("Record", fontSize = 12.sp) }
+                    label = { Text("录制", fontSize = 12.sp) }
                 )
                 NavigationBarItem(
                     selected = selectedTab == 1,
                     onClick = { selectedTab = 1 },
                     icon = { Text("🗺", fontSize = 18.sp) },
-                    label = { Text("Map", fontSize = 12.sp) }
+                    label = { Text("地图", fontSize = 12.sp) }
                 )
                 NavigationBarItem(
                     selected = selectedTab == 2,
                     onClick = { selectedTab = 2 },
                     icon = { Text("📋", fontSize = 18.sp) },
-                    label = { Text("List", fontSize = 12.sp) }
+                    label = { Text("列表", fontSize = 12.sp) }
                 )
                 NavigationBarItem(
                     selected = selectedTab == 3,
                     onClick = { selectedTab = 3 },
                     icon = { Text("📤", fontSize = 18.sp) },
-                    label = { Text("Export", fontSize = 12.sp) }
+                    label = { Text("导出", fontSize = 12.sp) }
                 )
             }
         }
@@ -94,13 +94,14 @@ fun MainScreen() {
                     context = context,
                     recording = recording,
                     shizukuGranted = shizukuPerm,
+                    a11yEnabled = a11yEnabled,
+                    opMap = opMap,
                     onToggleRecording = { start ->
                         if (!start) {
                             val intent = Intent(context, RecordService::class.java).apply {
                                 action = RecordService.ACTION_STOP
                             }
                             context.startService(intent)
-                            // Give it a moment to save, then reload
                             scope.launch {
                                 delay(1000)
                                 refreshData()
@@ -112,7 +113,19 @@ fun MainScreen() {
                         try {
                             Shizuku.requestPermission(1001)
                         } catch (_: Exception) {
-                            Toast.makeText(context, "Shizuku not running", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(context, "Shizuku 未运行", Toast.LENGTH_SHORT).show()
+                        }
+                    },
+                    onEnableA11y = {
+                        scope.launch {
+                            Toast.makeText(context, "正在启用...", Toast.LENGTH_SHORT).show()
+                            val ok = ShizukuShell.enableAccessibilityService()
+                            if (ok) {
+                                Toast.makeText(context, "无障碍已启用！", Toast.LENGTH_SHORT).show()
+                                a11yEnabled = true
+                            } else {
+                                Toast.makeText(context, "失败，请手动设置：设置 → 无障碍", Toast.LENGTH_LONG).show()
+                            }
                         }
                     }
                 )
@@ -123,11 +136,11 @@ fun MainScreen() {
         }
     }
 
-    // Poll for state changes and live data
     LaunchedEffect(Unit) {
         while (true) {
             recording = RecordService.isRunning
             shizukuPerm = ShizukuShell.isPermissionGranted()
+            a11yEnabled = RecordService.isA11yServiceEnabled()
             refreshData()
             delay(2000)
         }
@@ -139,15 +152,22 @@ private fun RecordTab(
     context: Context,
     recording: Boolean,
     shizukuGranted: Boolean,
+    a11yEnabled: Boolean,
+    opMap: OpMap?,
     onToggleRecording: (Boolean) -> Unit,
-    onRequestShizuku: () -> Unit
+    onRequestShizuku: () -> Unit,
+    onEnableA11y: () -> Unit
 ) {
+    val byPackage = opMap?.nodes?.values?.groupBy { it.appPackage }
+    val hasRichMode = a11yEnabled
+
     Column(
         modifier = Modifier.fillMaxSize(),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Spacer(Modifier.height(32.dp))
+        Spacer(Modifier.height(16.dp))
 
+        // 状态卡片
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(
@@ -158,11 +178,11 @@ private fun RecordTab(
             )
         ) {
             Column(
-                modifier = Modifier.padding(24.dp),
+                modifier = Modifier.padding(20.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 Text(
-                    text = if (recording) "● Recording" else "Stopped",
+                    text = if (recording) "● 录制中" else "已停止",
                     fontSize = 24.sp,
                     fontWeight = FontWeight.Bold,
                     color = if (recording)
@@ -173,33 +193,127 @@ private fun RecordTab(
                 Spacer(Modifier.height(8.dp))
                 Text(
                     text = when {
-                        recording -> "Polling dumpsys via Shizuku"
-                        !shizukuGranted -> "Need Shizuku permission"
-                        else -> "Tap Start to begin recording"
-                    }
+                        recording && hasRichMode -> "无障碍服务 + Shizuku（详细）"
+                        recording -> "仅 Shizuku 轮询（基础）"
+                        !shizukuGranted -> "需要 Shizuku 授权"
+                        else -> "点「开始录制」启动"
+                    },
+                    fontSize = 14.sp
                 )
             }
         }
 
-        Spacer(Modifier.height(24.dp))
+        Spacer(Modifier.height(12.dp))
+
+        // 无障碍引导
+        if (!hasRichMode) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.secondaryContainer
+                )
+            ) {
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Text(
+                        "未启用无障碍，无法记录点击文字",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 13.sp
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "可通过下方按钮自动启用，或手动：\n" +
+                                "设置 → 无障碍 → 无障碍快捷与辅助 → 更多已下载的服务",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.8f)
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Button(
+                        onClick = onEnableA11y,
+                        modifier = Modifier.fillMaxWidth().height(40.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.tertiary
+                        )
+                    ) {
+                        Text("通过 Shizuku 自动启用", fontSize = 11.sp)
+                    }
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+        }
+
+        // 录制中实时统计
+        if (recording && opMap != null) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.tertiaryContainer
+                )
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        "录制统计",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 14.sp
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Row(modifier = Modifier.fillMaxWidth()) {
+                        StatItem("应用", byPackage?.size?.toString() ?: "0", Modifier.weight(1f))
+                        StatItem("页面", opMap.nodes.size.toString(), Modifier.weight(1f))
+                        StatItem("跳转", opMap.edges.size.toString(), Modifier.weight(1f))
+                        StatItem("操作", opMap.totalActions.toString(), Modifier.weight(1f))
+                    }
+
+                    if (opMap.actions.isNotEmpty()) {
+                        Spacer(Modifier.height(4.dp))
+                        val lastAction = opMap.actions.last()
+                        Text(
+                            text = "最新: ${if (lastAction.actionType == "CLICK") "点击" else if (lastAction.actionType == "TRANSITION") "跳转" else lastAction.actionType} \"${lastAction.elementLabel.take(30)}\"",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.7f)
+                        )
+                    }
+
+                    if (byPackage != null && byPackage.size > 1) {
+                        Spacer(Modifier.height(8.dp))
+                        HorizontalDivider()
+                        Spacer(Modifier.height(8.dp))
+                        byPackage.forEach { (_, nodes) ->
+                            val appName = nodes.first().appName
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(appName, fontSize = 12.sp)
+                                Text(
+                                    "${nodes.size} 个页面",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+        }
 
         if (!shizukuGranted && !recording) {
             Button(
                 onClick = onRequestShizuku,
-                modifier = Modifier.fillMaxWidth().height(56.dp),
+                modifier = Modifier.fillMaxWidth().height(48.dp),
                 colors = ButtonDefaults.buttonColors(
                     containerColor = MaterialTheme.colorScheme.secondary
                 )
             ) {
-                Text("AUTHORIZE SHIZUKU", fontSize = 16.sp)
+                Text("授权 Shizuku", fontSize = 14.sp)
             }
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(8.dp))
         }
 
         Button(
             onClick = {
                 if (!shizukuGranted) {
-                    Toast.makeText(context, "Authorize Shizuku first", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, "请先授权 Shizuku", Toast.LENGTH_SHORT).show()
                     return@Button
                 }
                 val intent = Intent(context, RecordService::class.java).apply {
@@ -213,7 +327,7 @@ private fun RecordTab(
                 }
                 onToggleRecording(!recording)
             },
-            modifier = Modifier.fillMaxWidth().height(56.dp),
+            modifier = Modifier.fillMaxWidth().height(52.dp),
             enabled = shizukuGranted || recording,
             colors = ButtonDefaults.buttonColors(
                 containerColor = if (recording)
@@ -223,24 +337,24 @@ private fun RecordTab(
             )
         ) {
             Text(
-                if (recording) "STOP RECORDING" else "START RECORDING",
-                fontSize = 16.sp
+                if (recording) "停止录制" else "开始录制",
+                fontSize = 15.sp
             )
         }
 
-        Spacer(Modifier.height(16.dp))
+        Spacer(Modifier.height(8.dp))
 
         Card(modifier = Modifier.fillMaxWidth()) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Text("System", fontWeight = FontWeight.Bold)
-                Spacer(Modifier.height(4.dp))
+            Column(modifier = Modifier.padding(12.dp)) {
+                Text("系统状态", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                Spacer(Modifier.height(2.dp))
                 Text(
-                    text = "Shizuku: ${if (shizukuGranted) "✅ Authorized" else "❌ Not authorized"}",
-                    fontSize = 14.sp
+                    text = "Shizuku: ${if (shizukuGranted) "✅ 已授权" else "❌ 未授权"}",
+                    fontSize = 12.sp
                 )
                 Text(
-                    text = "Mode: Shizuku polling (dumpsys)",
-                    fontSize = 14.sp,
+                    text = "无障碍: ${if (a11yEnabled) "✅ 已启用（详细模式）" else "⚠ 未启用（基础模式）"}",
+                    fontSize = 12.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
@@ -249,10 +363,30 @@ private fun RecordTab(
 }
 
 @Composable
+private fun StatItem(label: String, value: String, modifier: Modifier = Modifier) {
+    Column(
+        modifier = modifier,
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(
+            text = value,
+            fontSize = 22.sp,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.onTertiaryContainer
+        )
+        Text(
+            text = label,
+            fontSize = 11.sp,
+            color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.7f)
+        )
+    }
+}
+
+@Composable
 private fun MapViewTab(opMap: OpMap?) {
     if (opMap == null || opMap.nodes.isEmpty()) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Text("No data yet. Start recording first!",
+            Text("暂无数据，请先录制",
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     } else {
@@ -264,7 +398,7 @@ private fun MapViewTab(opMap: OpMap?) {
 private fun RecordListTab(opMap: OpMap?) {
     if (opMap == null || opMap.nodes.isEmpty()) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Text("No data yet.",
+            Text("暂无数据",
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     } else {
