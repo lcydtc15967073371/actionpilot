@@ -1,3 +1,10 @@
-# Shizuku AI
-通过 Shizuku 权限执行任意 Android 系统命令的悬浮窗命令执行器。
-v1.2.0 | 包名: com.shizuku.ai
+# Shizuku AI — Shizuku AI 助手
+
+通过 Shizuku + AI 实现智能操作的悬浮窗助手。
+支持自然语言指令、应用列表查询、自动化操作。
+
+## 功能
+- 自然语言转 Shizuku 命令
+- 获取已安装应用列表（含中文名）
+- AI 对话式操作
+- 悬浮窗快速启动
