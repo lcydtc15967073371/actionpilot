@@ -684,24 +684,91 @@ public class FloatService extends Service {
 
     // ====== 搜索引擎（Bing + Baidu 双引擎） ======
 
-    /** 联网搜索 - 先试 Bing，失败后自动切 Baidu */
+    // ====== 搜索（DuckDuckGo HTML + Bing 双引擎） ======
+
+    /** 联网搜索 */
     private void searchWeb(final String keyword) {
         new Thread(() -> {
             appendAIOutput("🌐 搜索: " + keyword + " ...");
-            String result = searchBing(keyword);
+            String result = searchDuckDuckGo(keyword);
             if (result == null || result.isEmpty()) {
-                result = searchBaidu(keyword);
+                result = searchBingV2(keyword);
             }
             if (result == null || result.isEmpty()) {
                 result = "未找到相关结果";
             }
             final String finalResult = result;
             appendAIOutput("🌐 搜索结果:\n" + finalResult);
-            aiAgent.submitToolResult("search_web", "联网搜索结果：\n" + finalResult, aiCallback);
+            aiAgent.submitToolResult("search_web", finalResult, aiCallback);
         }).start();
     }
 
-    private String searchBing(String keyword) {
+    /** DuckDuckGo HTML 搜索（结构简单稳定） */
+    private String searchDuckDuckGo(String keyword) {
+        try {
+            String query = URLEncoder.encode(keyword, "UTF-8");
+            URL url = new URL("https://html.duckduckgo.com/html/?q=" + query);
+            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            conn.setRequestMethod("GET");
+            conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/120.0");
+            conn.setConnectTimeout(10000);
+            conn.setReadTimeout(10000);
+
+            BufferedReader reader = new BufferedReader(new InputStreamReader(conn.getInputStream(), "UTF-8"));
+            StringBuilder html = new StringBuilder();
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (html.length() > 50000) break;
+                html.append(line);
+            }
+            reader.close();
+
+            String raw = html.toString();
+            StringBuilder results = new StringBuilder();
+            int count = 0;
+
+            // DuckDuckGo 结果在 <a rel="nofollow" class="result__a" href="..."> 中
+            int pos = 0;
+            while (count < 8 && pos < raw.length()) {
+                int aStart = raw.indexOf("class=\"result__a\"", pos);
+                if (aStart < 0) break;
+                int hrefStart = raw.indexOf("href=\"", aStart);
+                hrefStart = hrefStart > 0 ? hrefStart + 6 : -1;
+                int hrefEnd = hrefStart > 0 ? raw.indexOf("\"", hrefStart) : -1;
+                String link = (hrefStart > 0 && hrefEnd > hrefStart) ? raw.substring(hrefStart, hrefEnd) : "";
+
+                int tagStart = raw.indexOf(">", aStart);
+                int tagEnd = tagStart > 0 ? raw.indexOf("</a>", tagStart) : -1;
+                String title = (tagStart > 0 && tagEnd > tagStart) ?
+                    raw.substring(tagStart + 1, tagEnd).trim() : "";
+                if (title.isEmpty()) { pos = tagEnd + 1; continue; }
+
+                // 找对应的摘要：class="result__snippet"
+                int sStart = raw.indexOf("class=\"result__snippet\"", tagEnd);
+                String snippet = "";
+                if (sStart > 0 && sStart < tagEnd + 1000) {
+                    int sTagStart = raw.indexOf(">", sStart);
+                    int sTagEnd = sTagStart > 0 ? raw.indexOf("</", sTagStart) : -1;
+                    snippet = (sTagStart > 0 && sTagEnd > sTagStart) ?
+                        raw.substring(sTagStart + 1, sTagEnd).trim() : "";
+                }
+
+                count++;
+                results.append("[").append(count).append("] ").append(title).append("\n");
+                if (link.length() > 0) results.append("    ").append(link).append("\n");
+                if (snippet.length() > 0) results.append("    ").append(snippet).append("\n\n");
+
+                pos = tagEnd + 1;
+            }
+
+            return results.length() > 0 ? results.toString().trim() : null;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** Bing 搜索（备用） */
+    private String searchBingV2(String keyword) {
         try {
             String query = URLEncoder.encode(keyword, "UTF-8");
             URL url = new URL("https://www.bing.com/search?q=" + query + "&count=10");
@@ -722,144 +789,55 @@ public class FloatService extends Service {
 
             String raw = html.toString();
             StringBuilder results = new StringBuilder();
-
-            // Bing 结果在 <li class="b_algo"> 中
-            int pos = 0;
             int count = 0;
-            while (count < 10) {
-                int algoStart = raw.indexOf("<li class=\"b_algo\"", pos);
-                if (algoStart < 0) {
-                    // 尝试另一种格式
-                    algoStart = raw.indexOf("<li class=\"b_algo", pos);
-                }
+            int pos = 0;
+
+            while (count < 10 && pos < raw.length()) {
+                int algoStart = raw.indexOf("class=\"b_algo\"", pos);
                 if (algoStart < 0) break;
 
-                // 提取整个 li 块
+                // 往回找 <li 的开头
+                int liStart = raw.lastIndexOf("<li", algoStart);
+                if (liStart < 0 || liStart < pos - 100) { pos = algoStart + 12; continue; }
                 int liEnd = raw.indexOf("</li>", algoStart);
                 if (liEnd < 0) break;
-                String block = raw.substring(algoStart, liEnd);
 
-                // 提取标题和链接
-                int hrefStart = block.indexOf("href=\"");
-                int hrefEnd = hrefStart > 0 ? block.indexOf("\"", hrefStart + 6) : -1;
-                String link = (hrefStart > 0 && hrefEnd > hrefStart) ? block.substring(hrefStart + 6, hrefEnd) : "";
+                String block = raw.substring(liStart, liEnd + 5);
 
-                int aStart = block.indexOf("<a ");
-                int aTagStart = aStart > 0 ? block.indexOf(">", aStart) : -1;
-                int aTagEnd = aTagStart > 0 ? block.indexOf("</a>", aTagStart) : -1;
-                String title = (aTagStart > 0 && aTagEnd > aTagStart) ?
-                    block.substring(aTagStart + 1, aTagEnd).replaceAll("<[^>]+>", "").trim() : "";
-
-                // 提取摘要 (在 <p> 标签中)
-                int pStart = block.indexOf("<p");
-                int pTagStart = pStart > 0 ? block.indexOf(">", pStart) : -1;
-                int pEnd = pTagStart > 0 ? block.indexOf("</p>", pTagStart) : -1;
-                String snippet = (pTagStart > 0 && pEnd > pTagStart) ?
-                    block.substring(pTagStart + 1, pEnd).replaceAll("<[^>]+>", "").trim() : "";
+                // 标题 - 找 h2 > a
+                int h2Start = block.indexOf("<h2");
+                int aStart2 = h2Start > 0 ? block.indexOf("<a ", h2Start) : -1;
+                int hrefStart2 = aStart2 > 0 ? block.indexOf("href=\"", aStart2) : -1;
+                String link = "";
+                if (hrefStart2 > 0) {
+                    int hrefEnd2 = block.indexOf("\"", hrefStart2 + 6);
+                    link = (hrefEnd2 > hrefStart2) ? block.substring(hrefStart2 + 6, hrefEnd2) : "";
+                }
+                int aTagStart2 = aStart2 > 0 ? block.indexOf(">", aStart2) : -1;
+                int aTagEnd2 = aTagStart2 > 0 ? block.indexOf("</a>", aTagStart2) : -1;
+                String title = (aTagStart2 > 0 && aTagEnd2 > aTagStart2) ?
+                    block.substring(aTagStart2 + 1, aTagEnd2).replaceAll("<[^>]+>", "").trim() : "";
 
                 if (title.length() > 1) {
                     count++;
                     results.append("[").append(count).append("] ").append(title).append("\n");
                     if (link.length() > 0) results.append("    ").append(link).append("\n");
-                    if (snippet.length() > 0) results.append("    ").append(snippet).append("\n\n");
+                    // 摘要
+                    int pStart = block.indexOf("<p");
+                    int pTagStart = pStart > 0 ? block.indexOf(">", pStart) : -1;
+                    int pEnd = pTagStart > 0 ? block.indexOf("</p>", pTagStart) : -1;
+                    if (pTagStart > 0 && pEnd > pTagStart) {
+                        results.append("    ").append(block.substring(pTagStart + 1, pEnd)
+                            .replaceAll("<[^>]+>", "").trim()).append("\n\n");
+                    }
                 }
-                pos = liEnd + 5;
+                pos = liEnd + 1;
             }
 
             return results.length() > 0 ? results.toString().trim() : null;
         } catch (Exception e) {
             return null;
         }
-    }
-
-    private String searchBaidu(String keyword) {
-        try {
-            String query = URLEncoder.encode(keyword, "UTF-8");
-            URL url = new URL("https://www.baidu.com/s?wd=" + query + "&rn=10");
-            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-            conn.setRequestMethod("GET");
-            conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/120.0");
-            conn.setConnectTimeout(10000);
-            conn.setReadTimeout(10000);
-
-            BufferedReader reader = new BufferedReader(new InputStreamReader(conn.getInputStream(), "UTF-8"));
-            StringBuilder html = new StringBuilder();
-            String line;
-            while ((line = reader.readLine()) != null) {
-                if (html.length() > 30000) break;
-                html.append(line);
-            }
-            reader.close();
-
-            String raw = html.toString();
-            StringBuilder results = new StringBuilder();
-
-            // 百度结果在 <div class="result"> 或 <div class="c-container"> 中
-            int pos = 0;
-            int count = 0;
-            while (count < 10) {
-                int rStart = raw.indexOf("class=\"result\"", pos);
-                if (rStart < 0) rStart = raw.indexOf("class=\"c-container\"", pos);
-                if (rStart < 0) break;
-
-                // 找包裹的 div
-                int divStart = raw.lastIndexOf("<div", rStart);
-                if (divStart < 0 || divStart < pos - 100) break;
-                int divEnd = findClosingDiv(raw, divStart);
-                if (divEnd < 0) break;
-                String block = raw.substring(divStart, divEnd);
-
-                // 标题
-                int hrefStart = block.indexOf("href=\"");
-                int hrefEnd = hrefStart > 0 ? block.indexOf("\"", hrefStart + 6) : -1;
-                String link = (hrefStart > 0 && hrefEnd > hrefStart) ? block.substring(hrefStart + 6, hrefEnd) : "";
-
-                int tStart = block.indexOf("class=\"t\"");
-                if (tStart < 0) tStart = block.indexOf("class=\"c-title-text\"");
-                int aStart2 = tStart > 0 ? block.indexOf(">", tStart) : -1;
-                int aEnd2 = aStart2 > 0 ? block.indexOf("</a>", aStart2) : -1;
-                String title = (aStart2 > 0 && aEnd2 > aStart2) ?
-                    block.substring(aStart2 + 1, aEnd2).replaceAll("<[^>]+>", "").trim() : "";
-
-                // 摘要
-                int absStart = block.indexOf("class=\"c-abstract\"");
-                if (absStart < 0) absStart = block.indexOf("class=\"c-span-last\"");
-                int absDivStart = absStart > 0 ? block.indexOf(">", absStart) : -1;
-                int absEnd = absDivStart > 0 ? block.indexOf("</div>", absDivStart) : -1;
-                String snippet = (absDivStart > 0 && absEnd > absDivStart) ?
-                    block.substring(absDivStart + 1, absEnd).replaceAll("<[^>]+>", "").trim() : "";
-
-                if (title.length() > 1) {
-                    count++;
-                    results.append("[").append(count).append("] ").append(title).append("\n");
-                    if (link.length() > 0) results.append("    ").append(link).append("\n");
-                    if (snippet.length() > 0) results.append("    ").append(snippet).append("\n\n");
-                }
-                pos = divEnd + 1;
-            }
-
-            return results.length() > 0 ? results.toString().trim() : null;
-        } catch (Exception e) {
-            return null;
-        }
-    }
-
-    private int findClosingDiv(String html, int openPos) {
-        int depth = 1;
-        int pos = openPos + 5;
-        while (depth > 0 && pos < html.length()) {
-            int nextOpen = html.indexOf("<div", pos);
-            int nextClose = html.indexOf("</div>", pos);
-            if (nextClose < 0) return -1;
-            if (nextOpen >= 0 && nextOpen < nextClose) {
-                depth++;
-                pos = nextOpen + 5;
-            } else {
-                depth--;
-                pos = nextClose + 6;
-            }
-        }
-        return pos;
     }
 
     // ====== 内置浏览器 ======

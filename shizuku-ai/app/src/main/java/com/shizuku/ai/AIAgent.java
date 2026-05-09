@@ -193,12 +193,28 @@ public class AIAgent {
     /** 解析AI响应：检测JSON工具调用，否则当纯文本 */
     private void parseResponse(String content, AICallback callback) {
         String trimmed = content.trim();
+        String textPart = "";
+        String jsonPart = trimmed;
 
-        // 尝试解析为JSON（可能是单个工具或工具数组）
-        if (trimmed.startsWith("{")) {
+        // 扫描全文找 {"tool": 开头的 JSON（AI 可能先说一句话再输出 JSON）
+        int toolJsonStart = trimmed.indexOf("{\"tool\"");
+        final String textBeforeJson;
+        if (toolJsonStart > 0) {
+            textBeforeJson = trimmed.substring(0, toolJsonStart).trim();
+            jsonPart = trimmed.substring(toolJsonStart).trim();
+        } else {
+            textBeforeJson = "";
+        }
+
+        // 尝试解析找到的 JSON 部分
+        if (jsonPart.startsWith("{\"tool\"")) {
             try {
-                JSONObject toolCall = new JSONObject(trimmed);
+                JSONObject toolCall = new JSONObject(jsonPart);
                 if (toolCall.has("tool")) {
+                    // 先显示 AI 的文字部分
+                    if (!textBeforeJson.isEmpty()) {
+                        mainHandler.post(() -> callback.onResponse(textBeforeJson));
+                    }
                     String toolName = toolCall.getString("tool");
                     String params = toolCall.has("params") ? toolCall.getJSONObject("params").toString() : "{}";
                     mainHandler.post(() -> callback.onToolCall(toolName, params));
@@ -207,10 +223,10 @@ public class AIAgent {
             } catch (Exception ignored) {}
         }
 
+        // 尝试数组格式 [{"tool":..., ...}]
         if (trimmed.startsWith("[")) {
             try {
                 JSONArray toolCalls = new JSONArray(trimmed);
-                // 只取第一个工具调用（后续工具等上一个执行完再说）
                 if (toolCalls.length() > 0) {
                     JSONObject first = toolCalls.getJSONObject(0);
                     if (first.has("tool")) {
