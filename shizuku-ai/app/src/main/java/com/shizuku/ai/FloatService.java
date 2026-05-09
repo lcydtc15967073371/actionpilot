@@ -17,15 +17,26 @@ import android.view.Gravity;
 import android.view.LayoutInflater;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.WindowManager;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
+import android.webkit.WebView;
+import android.webkit.WebSettings;
+import android.webkit.WebViewClient;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.ImageButton;
+import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
+
+import android.hardware.camera2.CameraAccessException;
+import android.hardware.camera2.CameraCharacteristics;
+import android.hardware.camera2.CameraManager;
+
+import org.json.JSONObject;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
@@ -34,6 +45,7 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLEncoder;
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
 
 public class FloatService extends Service {
@@ -58,6 +70,12 @@ public class FloatService extends Service {
     private ShizukuShellExecutor shellExecutor;
     private AIAgent aiAgent;
     private AIAgent.AICallback aiCallback;
+
+    // 浏览器相关
+    private View browserView;
+    private WebView webView;
+    private TextView browserUrlText;
+    private WindowManager.LayoutParams browserParams;
 
     @Override
     public void onCreate() {
@@ -172,6 +190,11 @@ public class FloatService extends Service {
         // ====== 初始化AI回调 ======
         initAICallback();
 
+        // ====== 自动启用无障碍服务 ======
+        if (ShizukuShell.isGranted()) {
+            enableAccessibilityService();
+        }
+
         // ====== 窗口布局参数 ======
         p = new WindowManager.LayoutParams();
         p.type = Build.VERSION.SDK_INT >= 26 ?
@@ -265,22 +288,15 @@ public class FloatService extends Service {
 
     // ====== AI 核心功能 ======
 
-    /** 初始化AI回调 */
+    /** 初始化AI回调（工具调用模式） */
     private void initAICallback() {
         aiCallback = new AIAgent.AICallback() {
             @Override
-            public void onResponse(String text, String command, boolean hasCommand) {
+            public void onResponse(String text) {
                 if (text != null && !text.isEmpty()) {
-                    // 精简AI废话：取第一段有效内容，太长就截断
                     String brief = text;
-                    int cut = brief.indexOf("\n\n");
-                    if (cut > 0) brief = brief.substring(0, cut);
-                    if (brief.length() > 120) brief = brief.substring(0, 120) + "...";
+                    if (brief.length() > 300) brief = brief.substring(0, 300) + "...";
                     appendAIOutput("🤖 " + brief);
-                }
-                if (hasCommand && command != null) {
-                    appendAIOutput("📋 执行: " + command);
-                    executeAICommand(command);
                 }
             }
 
@@ -290,16 +306,129 @@ public class FloatService extends Service {
             }
 
             @Override
-            public void onSearchRequest(String keyword, boolean isWebSearch) {
-                if (isWebSearch) {
-                    appendAIOutput("🌐 联网搜索: " + keyword + " ...");
-                    searchWeb(keyword);
-                } else {
-                    appendAIOutput("📖 查询命令库: " + keyword + " ...");
-                    searchCommandLibrary(keyword);
-                }
+            public void onToolCall(String toolName, String paramsJson) {
+                executeTool(toolName, paramsJson);
             }
         };
+    }
+
+    /** 工具调度中心：根据工具名分发到对应实现 */
+    private void executeTool(String toolName, String paramsJson) {
+        appendAIOutput("🛠️ 调用工具: " + toolName);
+        try {
+            JSONObject params = new JSONObject(paramsJson);
+            switch (toolName) {
+                case "search_web":
+                    searchWeb(params.optString("query", ""));
+                    break;
+                case "browse_url":
+                    showBrowser(params.optString("url", ""));
+                    break;
+                case "read_page":
+                    readCurrentPage();
+                    break;
+                case "read_screen":
+                    readScreenContent();
+                    break;
+                case "start_app":
+                    startAppByPackage(params.optString("package", ""));
+                    break;
+                case "list_apps":
+                    listInstalledApps(params.optString("keyword", ""));
+                    break;
+                case "toggle_flashlight":
+                    toggleFlashlight();
+                    break;
+                case "set_alarm":
+                    setAlarm(params.optInt("hour", 12), params.optInt("minutes", 0), params.optString("message", ""));
+                    break;
+                case "execute_shell":
+                    executeShell(params.optString("command", ""));
+                    break;
+                case "execute_intent":
+                    executeIntent(params);
+                    break;
+                case "get_device_info":
+                    getDeviceInfo();
+                    break;
+                case "learn":
+                    learnExperience(params.optString("key", ""), params.optString("value", ""));
+                    break;
+                default:
+                    appendAIOutput("❌ 未知工具: " + toolName);
+            }
+        } catch (Exception e) {
+            appendAIOutput("❌ 工具执行失败: " + e.getMessage());
+            aiAgent.submitToolResult(toolName, "[错误] " + e.getMessage(), aiCallback);
+        }
+    }
+
+    private void startAppByPackage(String pkg) {
+        appendAIOutput("📱 打开: " + pkg);
+        ShellResult sr = ShizukuShell.exec("monkey -p " + pkg + " 1");
+        aiAgent.submitToolResult("start_app", sr.output, aiCallback);
+    }
+
+    private void executeShell(String command) {
+        appendAIOutput("📋 执行: " + command);
+        new Thread(() -> {
+            ShellResult result = ShizukuShell.exec(command);
+            String output = result.output.length() > 0 ? result.output : "(无输出)";
+            aiAgent.submitToolResult("execute_shell", "退出码:" + result.exitCode + "\n" + output, aiCallback);
+        }).start();
+    }
+
+    private void executeIntent(JSONObject params) {
+        String action = params.optString("action", "");
+        if (action.isEmpty()) {
+            aiAgent.submitToolResult("execute_intent", "[错误] action 为空", aiCallback);
+            return;
+        }
+        StringBuilder cmd = new StringBuilder("am start -a " + action);
+        JSONObject extras = params.optJSONObject("extras");
+        if (extras != null) {
+            for (Iterator<String> it = extras.keys(); it.hasNext();) {
+                String key = it.next();
+                Object val = extras.opt(key);
+                if (val instanceof Integer) {
+                    cmd.append(" --ei ").append(key).append(" ").append(val);
+                } else if (val instanceof Boolean) {
+                    cmd.append(" --ez ").append(key).append(" ").append(val);
+                } else {
+                    cmd.append(" -e ").append(key).append(" ").append(val);
+                }
+            }
+        }
+        ShellResult sr = ShizukuShell.exec(cmd.toString());
+        aiAgent.submitToolResult("execute_intent", sr.output, aiCallback);
+    }
+
+    private void setAlarm(int hour, int minutes, String message) {
+        String cmd = "am start -a android.intent.action.SET_ALARM"
+            + " --ei android.intent.extra.alarm.HOUR " + hour
+            + " --ei android.intent.extra.alarm.MINUTES " + minutes;
+        if (!message.isEmpty()) {
+            cmd += " -e android.intent.extra.alarm.MESSAGE \"" + message + "\"";
+        }
+        ShizukuShell.exec(cmd);
+        aiAgent.submitToolResult("set_alarm", "闹钟已设置: " + hour + ":" + String.format("%02d", minutes) + (message.isEmpty() ? "" : " (" + message + ")"), aiCallback);
+    }
+
+    private void getDeviceInfo() {
+        new Thread(() -> {
+            StringBuilder info = new StringBuilder();
+            info.append("型号: ").append(ShizukuShell.exec("getprop ro.product.model")).append("\n");
+            info.append("厂商: ").append(ShizukuShell.exec("getprop ro.product.manufacturer")).append("\n");
+            info.append("Android: ").append(ShizukuShell.exec("getprop ro.build.version.release")).append("\n");
+            info.append("SDK: ").append(ShizukuShell.exec("getprop ro.build.version.sdk")).append("\n");
+            aiAgent.submitToolResult("get_device_info", info.toString().trim(), aiCallback);
+        }).start();
+    }
+
+    private void learnExperience(String key, String value) {
+        if (!key.isEmpty() && !value.isEmpty()) {
+            appendAIOutput("📚 已记住: " + key);
+        }
     }
 
     /** 发送消息给AI（自动携带相关记忆） */
@@ -314,6 +443,7 @@ public class FloatService extends Service {
 
         hideKeyboard();
         aiInput.setText("");
+        autoCloseBrowser();
         appendAIOutput("👤 " + text);
         appendAIOutput("⏳ 思考中...");
 
@@ -336,7 +466,7 @@ public class FloatService extends Service {
             if (listAppsCount >= 3) {
                 // 第三次执行 list_apps，直接告知AI停止并展示已有结果
                 appendAIOutput("⏹️ 应用列表已展示完毕，不再重复扫描");
-                aiAgent.submitSearchResult("应用列表已经展示过了。请直接把已展示的应用列表呈现给用户，不要再执行list_apps命令了。如果你觉得只有包名不好看，那就直接告诉用户这些就是包名，不需要重新执行。", aiCallback);
+                aiAgent.submitToolResult("list_apps", "应用列表已经展示过了。请直接把已展示的应用列表呈现给用户，不要再执行list_apps命令了。如果你觉得只有包名不好看，那就直接告诉用户这些就是包名，不需要重新执行。", aiCallback);
                 return;
             }
             String keyword = command.length() > 9 ? command.substring(9).trim() : "";
@@ -380,14 +510,14 @@ public class FloatService extends Service {
                 appendAIOutput("📤 结果 (退出码:" + exitCode + ", " + timeStr + "):\n" + result);
 
                 // 把结果喂回AI，让它分析
-                aiAgent.submitCommandResult(command, output, aiCallback);
+                aiAgent.submitToolResult("execute_shell", output, aiCallback);
             }
 
             @Override
             public void onError(String error) {
                 appendAIOutput("❌ 命令执行失败: " + error);
                 // 给AI反馈错误
-                aiAgent.submitCommandResult(command, "[ERROR] " + error, aiCallback);
+                aiAgent.submitToolResult("execute_shell", "[ERROR] " + error, aiCallback);
             }
         });
     }
@@ -408,7 +538,7 @@ public class FloatService extends Service {
         // 显示搜索结果给用户观察
         appendAIOutput("📖 命令库返回:\n" + sb.toString());
         // 喂给AI继续分析
-        aiAgent.submitSearchResult(sb.toString(), aiCallback);
+        aiAgent.submitToolResult("search_web", sb.toString(), aiCallback);
     }
 
     /** 列出已安装应用（通过 Shizuku shell 获取包名列表 + PackageManager 逐个查中文名） */
@@ -423,7 +553,7 @@ public class FloatService extends Service {
             public void onResult(String shellOutput, int exitCode, long elapsedMs) {
                 if (shellOutput.isEmpty() || shellOutput.contains("无输出")) {
                     appendAIOutput("📱 未找到第三方应用");
-                    aiAgent.submitSearchResult("手机上没找到第三方应用。这是最终结果。", aiCallback);
+                    aiAgent.submitToolResult("list_apps", "手机上没找到第三方应用。这是最终结果。", aiCallback);
                     return;
                 }
 
@@ -476,11 +606,11 @@ public class FloatService extends Service {
 
                         String result = "共 " + count + " 个应用:\n" + sb.toString();
                         appendAIOutput("📱 " + result);
-                        aiAgent.submitSearchResult("这是手机上安装的应用列表（中文名+包名）：\n" + result +
+                        aiAgent.submitToolResult("list_apps", "这是手机上安装的应用列表（中文名+包名）：\n" + result +
                             "\n\n✅ 这是最终结果，直接展示给用户。不要再执行 list_apps 命令。", aiCallback);
                     } catch (Exception e) {
                         appendAIOutput("❌ 扫描失败: " + e.getMessage());
-                        aiAgent.submitSearchResult("扫描失败: " + e.getMessage(), aiCallback);
+                        aiAgent.submitToolResult("list_apps", "扫描失败: " + e.getMessage(), aiCallback);
                     }
                 }).start();
             }
@@ -488,98 +618,405 @@ public class FloatService extends Service {
             @Override
             public void onError(String error) {
                 appendAIOutput("❌ 扫描失败: " + error);
-                aiAgent.submitSearchResult("扫描失败: " + error, aiCallback);
+                aiAgent.submitToolResult("list_apps", "扫描失败: " + error, aiCallback);
             }
         });
     }
 
-    /** 联网搜索（通过HTTP请求搜外网） */
+    // ====== 手电筒（CameraManager API，不走 ADB 猜命令） ======
+
+    private boolean torchOn = false;
+
+    private void toggleFlashlight() {
+        torchOn = !torchOn;
+        final boolean enable = torchOn;
+        appendAIOutput(enable ? "🔦 打开手电筒..." : "🔦 关闭手电筒...");
+
+        // 先试 Shizuku shell（OEM 专用路径，如 vivo）
+        if (ShizukuShell.isGranted()) {
+            new Thread(() -> {
+                try {
+                    if (enable) {
+                        ShizukuShell.exec("settings put system FlashState 1");
+                        ShizukuShell.exec("settings put system back_flashlight_state 1");
+                    } else {
+                        ShizukuShell.exec("settings put system FlashState 0");
+                        ShizukuShell.exec("settings put system back_flashlight_state 0");
+                    }
+                    // 验证
+                    ShellResult check = ShizukuShell.exec("settings get system FlashState");
+                    if ("1".equals(check.output.trim()) == enable) {
+                        appendAIOutput(enable ? "🔦 手电筒已打开" : "🔦 手电筒已关闭");
+                        return;
+                    }
+                } catch (Exception ignored) {}
+                // Shizuku 方式失败，试 CameraManager
+                fallbackFlashlight(enable);
+            }).start();
+        } else {
+            fallbackFlashlight(enable);
+        }
+    }
+
+    private void fallbackFlashlight(boolean enable) {
+        CameraManager cm = (CameraManager) getSystemService(CAMERA_SERVICE);
+        if (cm == null) { appendAIOutput("❌ 无法获取相机服务"); return; }
+        try {
+            String cameraId = null;
+            for (String id : cm.getCameraIdList()) {
+                CameraCharacteristics chars = cm.getCameraCharacteristics(id);
+                Boolean hasFlash = chars.get(CameraCharacteristics.FLASH_INFO_AVAILABLE);
+                Integer facing = chars.get(CameraCharacteristics.LENS_FACING);
+                if (hasFlash != null && hasFlash && facing != null
+                        && facing == CameraCharacteristics.LENS_FACING_BACK) {
+                    cameraId = id; break;
+                }
+            }
+            if (cameraId == null) { appendAIOutput("❌ 未找到闪光灯"); return; }
+            cm.setTorchMode(cameraId, enable);
+            appendAIOutput(enable ? "🔦 手电筒已打开" : "🔦 手电筒已关闭");
+        } catch (CameraAccessException e) {
+            appendAIOutput("❌ 手电筒控制失败: 无权限或相机被占用");
+        } catch (Exception e) {
+            appendAIOutput("❌ 手电筒控制失败: " + e.getMessage());
+        }
+    }
+
+    // ====== 搜索引擎（Bing + Baidu 双引擎） ======
+
+    /** 联网搜索 - 先试 Bing，失败后自动切 Baidu */
     private void searchWeb(final String keyword) {
         new Thread(() -> {
+            appendAIOutput("🌐 搜索: " + keyword + " ...");
+            String result = searchBing(keyword);
+            if (result == null || result.isEmpty()) {
+                result = searchBaidu(keyword);
+            }
+            if (result == null || result.isEmpty()) {
+                result = "未找到相关结果";
+            }
+            final String finalResult = result;
+            appendAIOutput("🌐 搜索结果:\n" + finalResult);
+            aiAgent.submitToolResult("search_web", "联网搜索结果：\n" + finalResult, aiCallback);
+        }).start();
+    }
+
+    private String searchBing(String keyword) {
+        try {
+            String query = URLEncoder.encode(keyword, "UTF-8");
+            URL url = new URL("https://www.bing.com/search?q=" + query + "&count=10");
+            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            conn.setRequestMethod("GET");
+            conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/120.0");
+            conn.setConnectTimeout(10000);
+            conn.setReadTimeout(10000);
+
+            BufferedReader reader = new BufferedReader(new InputStreamReader(conn.getInputStream(), "UTF-8"));
+            StringBuilder html = new StringBuilder();
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (html.length() > 30000) break;
+                html.append(line);
+            }
+            reader.close();
+
+            String raw = html.toString();
+            StringBuilder results = new StringBuilder();
+
+            // Bing 结果在 <li class="b_algo"> 中
+            int pos = 0;
+            int count = 0;
+            while (count < 10) {
+                int algoStart = raw.indexOf("<li class=\"b_algo\"", pos);
+                if (algoStart < 0) {
+                    // 尝试另一种格式
+                    algoStart = raw.indexOf("<li class=\"b_algo", pos);
+                }
+                if (algoStart < 0) break;
+
+                // 提取整个 li 块
+                int liEnd = raw.indexOf("</li>", algoStart);
+                if (liEnd < 0) break;
+                String block = raw.substring(algoStart, liEnd);
+
+                // 提取标题和链接
+                int hrefStart = block.indexOf("href=\"");
+                int hrefEnd = hrefStart > 0 ? block.indexOf("\"", hrefStart + 6) : -1;
+                String link = (hrefStart > 0 && hrefEnd > hrefStart) ? block.substring(hrefStart + 6, hrefEnd) : "";
+
+                int aStart = block.indexOf("<a ");
+                int aTagStart = aStart > 0 ? block.indexOf(">", aStart) : -1;
+                int aTagEnd = aTagStart > 0 ? block.indexOf("</a>", aTagStart) : -1;
+                String title = (aTagStart > 0 && aTagEnd > aTagStart) ?
+                    block.substring(aTagStart + 1, aTagEnd).replaceAll("<[^>]+>", "").trim() : "";
+
+                // 提取摘要 (在 <p> 标签中)
+                int pStart = block.indexOf("<p");
+                int pTagStart = pStart > 0 ? block.indexOf(">", pStart) : -1;
+                int pEnd = pTagStart > 0 ? block.indexOf("</p>", pTagStart) : -1;
+                String snippet = (pTagStart > 0 && pEnd > pTagStart) ?
+                    block.substring(pTagStart + 1, pEnd).replaceAll("<[^>]+>", "").trim() : "";
+
+                if (title.length() > 1) {
+                    count++;
+                    results.append("[").append(count).append("] ").append(title).append("\n");
+                    if (link.length() > 0) results.append("    ").append(link).append("\n");
+                    if (snippet.length() > 0) results.append("    ").append(snippet).append("\n\n");
+                }
+                pos = liEnd + 5;
+            }
+
+            return results.length() > 0 ? results.toString().trim() : null;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private String searchBaidu(String keyword) {
+        try {
+            String query = URLEncoder.encode(keyword, "UTF-8");
+            URL url = new URL("https://www.baidu.com/s?wd=" + query + "&rn=10");
+            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            conn.setRequestMethod("GET");
+            conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/120.0");
+            conn.setConnectTimeout(10000);
+            conn.setReadTimeout(10000);
+
+            BufferedReader reader = new BufferedReader(new InputStreamReader(conn.getInputStream(), "UTF-8"));
+            StringBuilder html = new StringBuilder();
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (html.length() > 30000) break;
+                html.append(line);
+            }
+            reader.close();
+
+            String raw = html.toString();
+            StringBuilder results = new StringBuilder();
+
+            // 百度结果在 <div class="result"> 或 <div class="c-container"> 中
+            int pos = 0;
+            int count = 0;
+            while (count < 10) {
+                int rStart = raw.indexOf("class=\"result\"", pos);
+                if (rStart < 0) rStart = raw.indexOf("class=\"c-container\"", pos);
+                if (rStart < 0) break;
+
+                // 找包裹的 div
+                int divStart = raw.lastIndexOf("<div", rStart);
+                if (divStart < 0 || divStart < pos - 100) break;
+                int divEnd = findClosingDiv(raw, divStart);
+                if (divEnd < 0) break;
+                String block = raw.substring(divStart, divEnd);
+
+                // 标题
+                int hrefStart = block.indexOf("href=\"");
+                int hrefEnd = hrefStart > 0 ? block.indexOf("\"", hrefStart + 6) : -1;
+                String link = (hrefStart > 0 && hrefEnd > hrefStart) ? block.substring(hrefStart + 6, hrefEnd) : "";
+
+                int tStart = block.indexOf("class=\"t\"");
+                if (tStart < 0) tStart = block.indexOf("class=\"c-title-text\"");
+                int aStart2 = tStart > 0 ? block.indexOf(">", tStart) : -1;
+                int aEnd2 = aStart2 > 0 ? block.indexOf("</a>", aStart2) : -1;
+                String title = (aStart2 > 0 && aEnd2 > aStart2) ?
+                    block.substring(aStart2 + 1, aEnd2).replaceAll("<[^>]+>", "").trim() : "";
+
+                // 摘要
+                int absStart = block.indexOf("class=\"c-abstract\"");
+                if (absStart < 0) absStart = block.indexOf("class=\"c-span-last\"");
+                int absDivStart = absStart > 0 ? block.indexOf(">", absStart) : -1;
+                int absEnd = absDivStart > 0 ? block.indexOf("</div>", absDivStart) : -1;
+                String snippet = (absDivStart > 0 && absEnd > absDivStart) ?
+                    block.substring(absDivStart + 1, absEnd).replaceAll("<[^>]+>", "").trim() : "";
+
+                if (title.length() > 1) {
+                    count++;
+                    results.append("[").append(count).append("] ").append(title).append("\n");
+                    if (link.length() > 0) results.append("    ").append(link).append("\n");
+                    if (snippet.length() > 0) results.append("    ").append(snippet).append("\n\n");
+                }
+                pos = divEnd + 1;
+            }
+
+            return results.length() > 0 ? results.toString().trim() : null;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private int findClosingDiv(String html, int openPos) {
+        int depth = 1;
+        int pos = openPos + 5;
+        while (depth > 0 && pos < html.length()) {
+            int nextOpen = html.indexOf("<div", pos);
+            int nextClose = html.indexOf("</div>", pos);
+            if (nextClose < 0) return -1;
+            if (nextOpen >= 0 && nextOpen < nextClose) {
+                depth++;
+                pos = nextOpen + 5;
+            } else {
+                depth--;
+                pos = nextClose + 6;
+            }
+        }
+        return pos;
+    }
+
+    // ====== 内置浏览器 ======
+
+    private void showBrowser(String url) {
+        if (browserView == null) {
+            createBrowserOverlay();
+        }
+        browserUrlText.setText(url);
+        webView.loadUrl(url);
+        // 调整位置在主浮窗下方
+        browserParams.x = p.x;
+        browserParams.y = p.y + v.getHeight() + 5;
+        if (browserParams.y < 0) browserParams.y = 0;
+        try {
+            wm.updateViewLayout(browserView, browserParams);
+        } catch (Exception ignored) {}
+        if (!browserView.isAttachedToWindow()) {
+            try { wm.addView(browserView, browserParams); } catch (Exception ignored) {}
+        }
+        browserView.setVisibility(View.VISIBLE);
+    }
+
+    private void hideBrowser() {
+        if (browserView != null) {
+            browserView.setVisibility(View.GONE);
+            try { wm.removeView(browserView); } catch (Exception ignored) {}
+        }
+    }
+
+    private void createBrowserOverlay() {
+        LinearLayout layout = new LinearLayout(this);
+        layout.setOrientation(LinearLayout.VERTICAL);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(0xEE222222);
+        bg.setCornerRadius(12);
+        layout.setBackground(bg);
+        layout.setPadding(4, 4, 4, 4);
+
+        // 标题栏
+        LinearLayout titleBar = new LinearLayout(this);
+        titleBar.setOrientation(LinearLayout.HORIZONTAL);
+        titleBar.setLayoutParams(new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, 28));
+
+        browserUrlText = new TextView(this);
+        browserUrlText.setTextSize(9);
+        browserUrlText.setTextColor(0xFF8888FF);
+        browserUrlText.setMaxLines(1);
+        browserUrlText.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        browserUrlText.setPadding(4, 0, 4, 0);
+        titleBar.addView(browserUrlText, new LinearLayout.LayoutParams(0, 28, 1));
+
+        Button closeBtn = new Button(this);
+        closeBtn.setText("✕");
+        closeBtn.setTextSize(10);
+        closeBtn.setTextColor(0xFFFF8888);
+        closeBtn.setBackgroundTintList(android.content.res.ColorStateList.valueOf(0x55333333));
+        closeBtn.setMinWidth(0);
+        closeBtn.setMinHeight(0);
+        closeBtn.setPadding(0, 0, 0, 0);
+        closeBtn.setOnClickListener(v -> hideBrowser());
+        titleBar.addView(closeBtn, 24, 24);
+        layout.addView(titleBar);
+
+        // WebView
+        webView = new WebView(this);
+        WebSettings ws = webView.getSettings();
+        ws.setJavaScriptEnabled(true);
+        ws.setUserAgentString("Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/120.0");
+        ws.setBuiltInZoomControls(true);
+        ws.setDisplayZoomControls(false);
+        ws.setLoadWithOverviewMode(true);
+        ws.setUseWideViewPort(true);
+        webView.setWebViewClient(new WebViewClient() {
+            @Override
+            public void onPageFinished(WebView view, String url) {
+                browserUrlText.setText(url);
+            }
+        });
+        webView.setLayoutParams(new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, 350));
+        layout.addView(webView);
+
+        browserView = layout;
+
+        // 窗口参数：比主浮窗宽一点
+        int sw = getResources().getDisplayMetrics().widthPixels;
+        browserParams = new WindowManager.LayoutParams();
+        browserParams.type = Build.VERSION.SDK_INT >= 26 ?
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY :
+            WindowManager.LayoutParams.TYPE_PHONE;
+        browserParams.flags = WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+            | WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH;
+        browserParams.format = PixelFormat.TRANSLUCENT;
+        browserParams.gravity = Gravity.TOP | Gravity.START;
+        browserParams.width = (int) (sw * 0.75f);
+        browserParams.height = WindowManager.LayoutParams.WRAP_CONTENT;
+    }
+
+    /** 被动用后关闭浏览器（如发新消息时自动隐藏） */
+    private void autoCloseBrowser() {
+        if (browserView != null && browserView.getVisibility() == View.VISIBLE) {
+            hideBrowser();
+        }
+    }
+
+    /** 读屏幕：获取无障碍服务捕获的当前屏幕文字 */
+    private void readScreenContent() {
+        String text = ShizukuAccessibilityService.lastScreenText;
+        String app = ShizukuAccessibilityService.currentAppName;
+        if (text.isEmpty()) {
+            aiAgent.submitToolResult("read_screen", "（无障碍服务未捕获到屏幕内容，可能未启用）", aiCallback);
+            return;
+        }
+        String result = "当前应用: " + app + "\n屏幕内容: " + text;
+        appendAIOutput("📱 " + result.substring(0, Math.min(result.length(), 300)));
+        aiAgent.submitToolResult("read_screen", result, aiCallback);
+    }
+
+    /** 通过 Shizuku 自动启用无障碍服务 */
+    private void enableAccessibilityService() {
+        new Thread(() -> {
             try {
-                // 使用 DuckDuckGo lite (不需要API key，响应是文本)
-                String query = URLEncoder.encode(keyword, "UTF-8");
-                URL url = new URL("https://lite.duckduckgo.com/lite/?q=" + query);
-                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-                conn.setRequestMethod("GET");
-                conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36");
-                conn.setConnectTimeout(15000);
-                conn.setReadTimeout(15000);
-
-                BufferedReader reader = new BufferedReader(new InputStreamReader(conn.getInputStream(), "UTF-8"));
-                StringBuilder html = new StringBuilder();
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    if (html.length() > 5000) break;
-                    html.append(line);
+                String component = "com.shizuku.ai/com.shizuku.ai.ShizukuAccessibilityService";
+                ShizukuShell.exec("settings put secure enabled_accessibility_services \"" + component + "\"");
+                ShizukuShell.exec("settings put secure accessibility_enabled 1");
+                Thread.sleep(1000);
+                ShellResult check2 = ShizukuShell.exec("settings get secure enabled_accessibility_services");
+                if (check2.output.contains("com.shizuku.ai")) {
+                    appendAIOutput("✅ 无障碍服务已启用");
+                } else {
+                    appendAIOutput("⚠️ 无障碍启用失败，请在设置中手动开启");
                 }
-                reader.close();
-
-                // 提取搜索结果：标题+链接+摘要
-                String rawHtml = html.toString();
-                StringBuilder results = new StringBuilder();
-
-                // 先提取所有 result-link 和对应的 href / snippet
-                int idx = 0;
-                int count = 0;
-                while (count < 8 && idx < rawHtml.length()) {
-                    int linkIdx = rawHtml.indexOf("class=\"result-link\"", idx);
-                    int snippetIdx = rawHtml.indexOf("class=\"result-snippet\"", idx);
-                    if (linkIdx < 0 && snippetIdx < 0) break;
-
-                    // 先找链接文本
-                    if (linkIdx >= 0 && (snippetIdx < 0 || linkIdx < snippetIdx)) {
-                        // 提取超链接href
-                        int hrefStart = rawHtml.lastIndexOf("<a ", linkIdx);
-                        int hrefEnd = rawHtml.indexOf(">", hrefStart);
-                        String hrefAttr = "";
-                        if (hrefStart >= 0 && hrefEnd > hrefStart) {
-                            int h = rawHtml.indexOf("href=\"", hrefStart);
-                            if (h >= 0 && h < hrefEnd) {
-                                int hEnd = rawHtml.indexOf("\"", h + 6);
-                                hrefAttr = rawHtml.substring(h + 6, hEnd);
-                            }
-                        }
-                        int aTag = rawHtml.indexOf(">", linkIdx);
-                        int closeTag = rawHtml.indexOf("</a>", aTag);
-                        if (aTag >= 0 && closeTag > aTag) {
-                            String text = rawHtml.substring(aTag + 1, closeTag)
-                                .replaceAll("<[^>]+>", "").trim();
-                            if (text.length() > 2) {
-                                results.append("[").append(count + 1).append("] ").append(text);
-                                if (!hrefAttr.isEmpty()) results.append(" (").append(hrefAttr).append(")");
-                                results.append("\n");
-                            }
-                        }
-                        idx = closeTag + 1;
-                        count++;
-                    } else if (snippetIdx >= 0) {
-                        // 提取摘要文本
-                        int aTag = rawHtml.indexOf(">", snippetIdx);
-                        int closeTag = rawHtml.indexOf("</td>", aTag);
-                        if (aTag >= 0 && closeTag > aTag) {
-                            String text = rawHtml.substring(aTag + 1, closeTag)
-                                .replaceAll("<[^>]+>", "").trim();
-                            if (text.length() > 2) {
-                                results.append("   ").append(text).append("\n\n");
-                            }
-                        }
-                        idx = closeTag + 1;
-                    } else {
-                        break;
-                    }
-                }
-
-                String resultText = results.toString().trim();
-                if (resultText.isEmpty()) resultText = "未找到相关结果";
-
-                appendAIOutput("🌐 联网返回:\n" + resultText);
-                aiAgent.submitSearchResult("联网搜索结果：\n" + resultText, aiCallback);
-
             } catch (Exception e) {
-                aiAgent.submitSearchResult("联网搜索失败: " + e.getMessage(), aiCallback);
+                appendAIOutput("⚠️ 无障碍启用失败: " + e.getMessage());
             }
         }).start();
+    }
+
+    private void readCurrentPage() {
+        if (webView == null) return;
+        webView.evaluateJavascript(
+            "(function() { return document.body.innerText.substring(0, 8000); })();",
+            value -> {
+                String text = value != null ? value.trim() : "";
+                // 去掉 JS 返回的引号包裹
+                if (text.startsWith("\"") && text.endsWith("\"")) {
+                    text = text.substring(1, text.length() - 1);
+                }
+                text = text.replace("\\n", "\n").replace("\\t", "\t");
+                if (text.isEmpty()) text = "（页面无文字内容）";
+                final String result = text;
+                appendAIOutput("📖 页面内容:\n" + result.substring(0, Math.min(result.length(), 500)));
+                aiAgent.submitToolResult("read_page", "当前浏览器页面的文字内容：\n" + result, aiCallback);
+            }
+        );
     }
 
     /** 清空AI聊天 */
