@@ -85,7 +85,7 @@ public class AIAgent {
         conversationHistory.add(new Message("user", userInput));
         executor.execute(() -> {
             try {
-                callDeepSeekAPI(callback, false);
+                callAIAPI(callback, false);
             } catch (Exception e) {
                 mainHandler.post(() -> callback.onError("API调用失败: " + e.getMessage()));
             }
@@ -98,17 +98,23 @@ public class AIAgent {
             "[工具: " + toolName + "] 执行结果:\n" + result));
         executor.execute(() -> {
             try {
-                callDeepSeekAPI(callback, true);
+                callAIAPI(callback, true);
             } catch (Exception e) {
                 mainHandler.post(() -> callback.onError("API调用失败: " + e.getMessage()));
             }
         });
     }
 
-    private void callDeepSeekAPI(AICallback callback, boolean isToolResult) throws Exception {
+    private void callAIAPI(AICallback callback, boolean isToolResult) throws Exception {
         String endpoint = tokenManager.getEndpoint();
         String token = tokenManager.getToken();
         String model = tokenManager.getModel();
+
+        // 自动补全 API 路径：兼容 Base URL 和完整 URL 两种格式
+        if (!endpoint.endsWith("/chat/completions")) {
+            if (!endpoint.endsWith("/")) endpoint += "/";
+            endpoint += "chat/completions";
+        }
 
         JSONObject body = new JSONObject();
         body.put("model", model);

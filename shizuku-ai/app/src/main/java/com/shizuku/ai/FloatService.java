@@ -127,15 +127,6 @@ public class FloatService extends Service {
         tvStatus.setText(tokenManager.hasToken() ? "🤖 AI就绪" : "🔑 需设置Token");
 
         // ====== 事件监听 ======
-        // 点浮窗外部 → 放焦点给其他应用
-        v.setOnTouchListener((vv, event) -> {
-            if (event.getAction() == MotionEvent.ACTION_OUTSIDE) {
-                hideKeyboard();
-                return true;
-            }
-            return false;
-        });
-
         // 输出点击复制
         output.setOnClickListener(vv -> copyText(output));
         aiOutput.setOnClickListener(vv -> copyText(aiOutput));
@@ -211,7 +202,7 @@ public class FloatService extends Service {
                 WindowManager.LayoutParams.TYPE_PHONE;
         p.flags = WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
                 | WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH
-                | WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE;
+                | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS;
         p.format = PixelFormat.TRANSLUCENT;
         p.gravity = Gravity.TOP | Gravity.START;
 
@@ -244,18 +235,12 @@ public class FloatService extends Service {
     // 无toggleMode，只保留CMD模式为备用
 
     private void showKeyboard(EditText et) {
-        // 临时去掉 FLAG_NOT_FOCUSABLE，让浮窗能拿焦点弹出键盘
-        p.flags = p.flags & ~WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE;
-        wm.updateViewLayout(v, p);
         et.requestFocus();
         InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
         imm.showSoftInput(et, InputMethodManager.SHOW_IMPLICIT);
     }
 
     private void hideKeyboard() {
-        // 重加 FLAG_NOT_FOCUSABLE，放焦点给其他应用
-        p.flags = p.flags | WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE;
-        try { wm.updateViewLayout(v, p); } catch (Exception ignored) {}
         InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
         View f = v.findFocus();
         if (f != null) { f.clearFocus(); imm.hideSoftInputFromWindow(f.getWindowToken(), 0); }
