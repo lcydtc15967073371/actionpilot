@@ -153,7 +153,8 @@ public class FloatService extends Service {
         v.findViewById(R.id.btn_ai_clear).setOnClickListener(vv -> clearAIChat());
         btnTokenSetup.setOnClickListener(vv -> showTokenDialog());
     v.findViewById(R.id.btn_close).setOnClickListener(vv -> {
-        // 彻底关闭：清空AI对话 + 停掉所有线程 + 销毁悬浮窗
+        // 彻底关闭：清空焦点 + 清空AI对话 + 停掉所有线程 + 销毁悬浮窗
+        cancelFocusBeforeExit();
         aiAgent.shutdown();
         stopSelf();
     });
@@ -195,13 +196,12 @@ public class FloatService extends Service {
             enableAccessibilityService();
         }
 
-        // ====== 窗口布局参数 ======
+        // ====== 窗口布局参数（照抄 Operit FloatingWindowManager） ======
         p = new WindowManager.LayoutParams();
         p.type = Build.VERSION.SDK_INT >= 26 ?
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY :
                 WindowManager.LayoutParams.TYPE_PHONE;
-        p.flags = WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
-                | WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH
+        p.flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                 | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS;
         p.format = PixelFormat.TRANSLUCENT;
         p.gravity = Gravity.TOP | Gravity.START;
@@ -211,6 +211,9 @@ public class FloatService extends Service {
         p.height = WindowManager.LayoutParams.WRAP_CONTENT;
         p.x = sw - p.width - 10;
         p.y = getResources().getDisplayMetrics().heightPixels / 3 + 5;
+
+        // Operit: 先加全屏遮罩（下层），再加主浮窗（上层），确保遮罩在主浮窗之下
+        ensureFocusDismissView();
 
         wm.addView(v, p);
 
@@ -232,18 +235,155 @@ public class FloatService extends Service {
         }
     }
 
-    // 无toggleMode，只保留CMD模式为备用
+    // ====== 照抄 Operit 的焦点管理方案 ======
+    // 参考: https://github.com/AAswordman/Operit 的 FloatingWindowManager.kt
 
-    private void showKeyboard(EditText et) {
-        et.requestFocus();
-        InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
-        imm.showSoftInput(et, InputMethodManager.SHOW_IMPLICIT);
+    private Handler focusHandler = new Handler(Looper.getMainLooper());
+    private Runnable pendingImeFocusRunnable = null;
+    private View focusDismissView = null;
+
+    private static final int IME_FOCUS_DELAY_MS = 200;
+    private static final int IME_FOCUS_RETRY_DELAY_MS = 50;
+    private static final int MAX_IME_FOCUS_RETRIES = 4;
+
+    /** 创建全屏透明 View，放在浮窗下层，用于捕获外部点击释放焦点 */
+    private void ensureFocusDismissView() {
+        if (focusDismissView != null) return;
+
+        focusDismissView = new View(this);
+        focusDismissView.setBackgroundColor(android.graphics.Color.TRANSPARENT);
+        focusDismissView.setVisibility(View.GONE);
+        focusDismissView.setClickable(true);
+        focusDismissView.setOnTouchListener((view, event) -> {
+            if (event.getAction() == MotionEvent.ACTION_DOWN) {
+                hideKeyboard();
+            }
+            return true;
+        });
+
+        WindowManager.LayoutParams dp = new WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            Build.VERSION.SDK_INT >= 26 ?
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY :
+                WindowManager.LayoutParams.TYPE_PHONE,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            PixelFormat.TRANSLUCENT
+        );
+        dp.gravity = Gravity.TOP | Gravity.START;
+        try {
+            wm.addView(focusDismissView, dp);
+        } catch (Exception e) {
+            focusDismissView = null;
+        }
     }
 
+    private void setFocusDismissOverlayEnabled(boolean enabled) {
+        if (focusDismissView != null) {
+            focusDismissView.setVisibility(enabled ? View.VISIBLE : View.GONE);
+        }
+    }
+
+    /** Operit 方案：显示键盘时去掉 NOT_FOCUSABLE + 加上 NOT_TOUCH_MODAL */
+    private void showKeyboard(EditText et) {
+        // Step 1: 窗口参数改为可聚焦
+        p.flags &= ~WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE;
+        p.flags |= WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                 | WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH;
+        try { wm.updateViewLayout(v, p); } catch (Exception ignored) {}
+
+        // Step 2: 启用全屏透明遮罩，捕获外部点击
+        ensureFocusDismissView();
+        setFocusDismissOverlayEnabled(true);
+
+        // Step 3: 取消旧任务，调度新 IME 显示（带重试）
+        scheduleImeShow(et, 0, IME_FOCUS_DELAY_MS);
+    }
+
+    /** Operit 方案：带重试的 IME 显示调度 */
+    private void scheduleImeShow(EditText et, int retryCount, long delayMillis) {
+        if (pendingImeFocusRunnable != null) {
+            focusHandler.removeCallbacks(pendingImeFocusRunnable);
+        }
+
+        Runnable r = new Runnable() {
+            @Override
+            public void run() {
+                if (pendingImeFocusRunnable != this) return;
+
+                if (!v.isAttachedToWindow() || v.getWindowToken() == null) {
+                    if (retryCount >= MAX_IME_FOCUS_RETRIES) {
+                        pendingImeFocusRunnable = null;
+                        return;
+                    }
+                    scheduleImeShow(et, retryCount + 1, IME_FOCUS_RETRY_DELAY_MS);
+                    return;
+                }
+
+                et.requestFocus();
+
+                // 验证焦点宿主是否就绪（是文本编辑器）
+                View focused = v.findFocus();
+                if (focused == null || !focused.isAttachedToWindow()
+                        || focused.getWindowToken() == null) {
+                    if (retryCount >= MAX_IME_FOCUS_RETRIES) {
+                        pendingImeFocusRunnable = null;
+                        return;
+                    }
+                    scheduleImeShow(et, retryCount + 1, IME_FOCUS_RETRY_DELAY_MS);
+                    return;
+                }
+
+                pendingImeFocusRunnable = null;
+                InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+                imm.showSoftInput(focused, InputMethodManager.SHOW_IMPLICIT);
+            }
+        };
+
+        pendingImeFocusRunnable = r;
+        focusHandler.postDelayed(r, delayMillis);
+    }
+
+    /** Operit 方案：隐藏键盘时先清焦点 + 再加 NOT_FOCUSABLE + 去掉 NOT_TOUCH_MODAL */
     private void hideKeyboard() {
+        // 取消任何待执行的 IME 焦点请求
+        if (pendingImeFocusRunnable != null) {
+            focusHandler.removeCallbacks(pendingImeFocusRunnable);
+            pendingImeFocusRunnable = null;
+        }
+
         InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
-        View f = v.findFocus();
-        if (f != null) { f.clearFocus(); imm.hideSoftInputFromWindow(f.getWindowToken(), 0); }
+
+        // Step 1: 先清子焦点，再清根焦点（Operit 顺序）
+        try {
+            View focused = v.findFocus();
+            if (focused != null) focused.clearFocus();
+        } catch (Exception ignored) {}
+        try { v.clearFocus(); } catch (Exception ignored) {}
+        imm.hideSoftInputFromWindow(v.getWindowToken(), 0);
+
+        // Step 2: 恢复 NOT_FOCUSABLE + 去掉 NOT_TOUCH_MODAL
+        p.flags |= WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE;
+        p.flags &= ~(WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                    | WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH);
+        try { wm.updateViewLayout(v, p); } catch (Exception ignored) {}
+
+        // Step 3: 关闭全屏遮罩
+        setFocusDismissOverlayEnabled(false);
+    }
+
+    /** Operit 方案：退出前清理焦点 */
+    private void cancelFocusBeforeExit() {
+        if (pendingImeFocusRunnable != null) {
+            focusHandler.removeCallbacks(pendingImeFocusRunnable);
+            pendingImeFocusRunnable = null;
+        }
+        InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+        try { v.clearFocus(); } catch (Exception ignored) {}
+        try { imm.hideSoftInputFromWindow(v.getWindowToken(), 0); } catch (Exception ignored) {}
+        p.flags |= WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE;
+        try { wm.updateViewLayout(v, p); } catch (Exception ignored) {}
+        setFocusDismissOverlayEnabled(false);
     }
 
     private void exec() {
@@ -882,8 +1022,7 @@ public class FloatService extends Service {
             }
             aiOutput.append("━━━━━━━━━━━━━━━━\n");
             aiOutput.append(text);
-            // 自动滚动到底部
-            aiScroll.fullScroll(ScrollView.FOCUS_DOWN);
+            // 不调 fullScroll，避免抢焦点
         });
     }
 
@@ -954,6 +1093,11 @@ public class FloatService extends Service {
 
     @Override
     public void onDestroy() {
+        cancelFocusBeforeExit();
+        if (focusDismissView != null && wm != null) {
+            try { wm.removeView(focusDismissView); } catch (Exception ignored) {}
+            focusDismissView = null;
+        }
         if (v != null && wm != null) { try { wm.removeView(v); } catch (Exception ignored) {} }
         super.onDestroy();
     }
