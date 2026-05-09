@@ -48,6 +48,9 @@ dependencies {
     implementation "dev.rikka.shizuku:provider:13.1.5"
     implementation "org.jetbrains.kotlin:kotlin-stdlib:2.0.21"
 
+    // OkHttp（搜索、联网、WebView都需要）
+    implementation "com.squareup.okhttp3:okhttp:4.12.0"
+
     // JSON解析
     implementation "org.json:json:20231013"
 }

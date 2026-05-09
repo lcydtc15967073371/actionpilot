@@ -127,6 +127,15 @@ public class FloatService extends Service {
         tvStatus.setText(tokenManager.hasToken() ? "🤖 AI就绪" : "🔑 需设置Token");
 
         // ====== 事件监听 ======
+        // 点浮窗外部 → 放焦点给其他应用
+        v.setOnTouchListener((vv, event) -> {
+            if (event.getAction() == MotionEvent.ACTION_OUTSIDE) {
+                hideKeyboard();
+                return true;
+            }
+            return false;
+        });
+
         // 输出点击复制
         output.setOnClickListener(vv -> copyText(output));
         aiOutput.setOnClickListener(vv -> copyText(aiOutput));
@@ -201,8 +210,8 @@ public class FloatService extends Service {
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY :
                 WindowManager.LayoutParams.TYPE_PHONE;
         p.flags = WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
-                | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
-                | WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH;
+                | WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH
+                | WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE;
         p.format = PixelFormat.TRANSLUCENT;
         p.gravity = Gravity.TOP | Gravity.START;
 
@@ -235,12 +244,18 @@ public class FloatService extends Service {
     // 无toggleMode，只保留CMD模式为备用
 
     private void showKeyboard(EditText et) {
+        // 临时去掉 FLAG_NOT_FOCUSABLE，让浮窗能拿焦点弹出键盘
+        p.flags = p.flags & ~WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE;
+        wm.updateViewLayout(v, p);
         et.requestFocus();
         InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
         imm.showSoftInput(et, InputMethodManager.SHOW_IMPLICIT);
     }
 
     private void hideKeyboard() {
+        // 重加 FLAG_NOT_FOCUSABLE，放焦点给其他应用
+        p.flags = p.flags | WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE;
+        try { wm.updateViewLayout(v, p); } catch (Exception ignored) {}
         InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
         View f = v.findFocus();
         if (f != null) { f.clearFocus(); imm.hideSoftInputFromWindow(f.getWindowToken(), 0); }
@@ -686,158 +701,16 @@ public class FloatService extends Service {
 
     // ====== 搜索（DuckDuckGo HTML + Bing 双引擎） ======
 
-    /** 联网搜索 */
+    /** 联网搜索（使用 OkHttp，三引擎） */
     private void searchWeb(final String keyword) {
         new Thread(() -> {
             appendAIOutput("🌐 搜索: " + keyword + " ...");
-            String result = searchDuckDuckGo(keyword);
-            if (result == null || result.isEmpty()) {
-                result = searchBingV2(keyword);
-            }
-            if (result == null || result.isEmpty()) {
-                result = "未找到相关结果";
-            }
+            String result = SearchEngine.search(keyword);
+            if (result.isEmpty()) result = "未找到相关结果";
             final String finalResult = result;
             appendAIOutput("🌐 搜索结果:\n" + finalResult);
             aiAgent.submitToolResult("search_web", finalResult, aiCallback);
         }).start();
-    }
-
-    /** DuckDuckGo HTML 搜索（结构简单稳定） */
-    private String searchDuckDuckGo(String keyword) {
-        try {
-            String query = URLEncoder.encode(keyword, "UTF-8");
-            URL url = new URL("https://html.duckduckgo.com/html/?q=" + query);
-            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-            conn.setRequestMethod("GET");
-            conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/120.0");
-            conn.setConnectTimeout(10000);
-            conn.setReadTimeout(10000);
-
-            BufferedReader reader = new BufferedReader(new InputStreamReader(conn.getInputStream(), "UTF-8"));
-            StringBuilder html = new StringBuilder();
-            String line;
-            while ((line = reader.readLine()) != null) {
-                if (html.length() > 50000) break;
-                html.append(line);
-            }
-            reader.close();
-
-            String raw = html.toString();
-            StringBuilder results = new StringBuilder();
-            int count = 0;
-
-            // DuckDuckGo 结果在 <a rel="nofollow" class="result__a" href="..."> 中
-            int pos = 0;
-            while (count < 8 && pos < raw.length()) {
-                int aStart = raw.indexOf("class=\"result__a\"", pos);
-                if (aStart < 0) break;
-                int hrefStart = raw.indexOf("href=\"", aStart);
-                hrefStart = hrefStart > 0 ? hrefStart + 6 : -1;
-                int hrefEnd = hrefStart > 0 ? raw.indexOf("\"", hrefStart) : -1;
-                String link = (hrefStart > 0 && hrefEnd > hrefStart) ? raw.substring(hrefStart, hrefEnd) : "";
-
-                int tagStart = raw.indexOf(">", aStart);
-                int tagEnd = tagStart > 0 ? raw.indexOf("</a>", tagStart) : -1;
-                String title = (tagStart > 0 && tagEnd > tagStart) ?
-                    raw.substring(tagStart + 1, tagEnd).trim() : "";
-                if (title.isEmpty()) { pos = tagEnd + 1; continue; }
-
-                // 找对应的摘要：class="result__snippet"
-                int sStart = raw.indexOf("class=\"result__snippet\"", tagEnd);
-                String snippet = "";
-                if (sStart > 0 && sStart < tagEnd + 1000) {
-                    int sTagStart = raw.indexOf(">", sStart);
-                    int sTagEnd = sTagStart > 0 ? raw.indexOf("</", sTagStart) : -1;
-                    snippet = (sTagStart > 0 && sTagEnd > sTagStart) ?
-                        raw.substring(sTagStart + 1, sTagEnd).trim() : "";
-                }
-
-                count++;
-                results.append("[").append(count).append("] ").append(title).append("\n");
-                if (link.length() > 0) results.append("    ").append(link).append("\n");
-                if (snippet.length() > 0) results.append("    ").append(snippet).append("\n\n");
-
-                pos = tagEnd + 1;
-            }
-
-            return results.length() > 0 ? results.toString().trim() : null;
-        } catch (Exception e) {
-            return null;
-        }
-    }
-
-    /** Bing 搜索（备用） */
-    private String searchBingV2(String keyword) {
-        try {
-            String query = URLEncoder.encode(keyword, "UTF-8");
-            URL url = new URL("https://www.bing.com/search?q=" + query + "&count=10");
-            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-            conn.setRequestMethod("GET");
-            conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/120.0");
-            conn.setConnectTimeout(10000);
-            conn.setReadTimeout(10000);
-
-            BufferedReader reader = new BufferedReader(new InputStreamReader(conn.getInputStream(), "UTF-8"));
-            StringBuilder html = new StringBuilder();
-            String line;
-            while ((line = reader.readLine()) != null) {
-                if (html.length() > 30000) break;
-                html.append(line);
-            }
-            reader.close();
-
-            String raw = html.toString();
-            StringBuilder results = new StringBuilder();
-            int count = 0;
-            int pos = 0;
-
-            while (count < 10 && pos < raw.length()) {
-                int algoStart = raw.indexOf("class=\"b_algo\"", pos);
-                if (algoStart < 0) break;
-
-                // 往回找 <li 的开头
-                int liStart = raw.lastIndexOf("<li", algoStart);
-                if (liStart < 0 || liStart < pos - 100) { pos = algoStart + 12; continue; }
-                int liEnd = raw.indexOf("</li>", algoStart);
-                if (liEnd < 0) break;
-
-                String block = raw.substring(liStart, liEnd + 5);
-
-                // 标题 - 找 h2 > a
-                int h2Start = block.indexOf("<h2");
-                int aStart2 = h2Start > 0 ? block.indexOf("<a ", h2Start) : -1;
-                int hrefStart2 = aStart2 > 0 ? block.indexOf("href=\"", aStart2) : -1;
-                String link = "";
-                if (hrefStart2 > 0) {
-                    int hrefEnd2 = block.indexOf("\"", hrefStart2 + 6);
-                    link = (hrefEnd2 > hrefStart2) ? block.substring(hrefStart2 + 6, hrefEnd2) : "";
-                }
-                int aTagStart2 = aStart2 > 0 ? block.indexOf(">", aStart2) : -1;
-                int aTagEnd2 = aTagStart2 > 0 ? block.indexOf("</a>", aTagStart2) : -1;
-                String title = (aTagStart2 > 0 && aTagEnd2 > aTagStart2) ?
-                    block.substring(aTagStart2 + 1, aTagEnd2).replaceAll("<[^>]+>", "").trim() : "";
-
-                if (title.length() > 1) {
-                    count++;
-                    results.append("[").append(count).append("] ").append(title).append("\n");
-                    if (link.length() > 0) results.append("    ").append(link).append("\n");
-                    // 摘要
-                    int pStart = block.indexOf("<p");
-                    int pTagStart = pStart > 0 ? block.indexOf(">", pStart) : -1;
-                    int pEnd = pTagStart > 0 ? block.indexOf("</p>", pTagStart) : -1;
-                    if (pTagStart > 0 && pEnd > pTagStart) {
-                        results.append("    ").append(block.substring(pTagStart + 1, pEnd)
-                            .replaceAll("<[^>]+>", "").trim()).append("\n\n");
-                    }
-                }
-                pos = liEnd + 1;
-            }
-
-            return results.length() > 0 ? results.toString().trim() : null;
-        } catch (Exception e) {
-            return null;
-        }
     }
 
     // ====== 内置浏览器 ======
@@ -847,6 +720,17 @@ public class FloatService extends Service {
             createBrowserOverlay();
         }
         browserUrlText.setText(url);
+        // 加载完成后自动读取内容返回给 AI
+        webView.setWebViewClient(new WebViewClient() {
+            @Override
+            public void onPageFinished(WebView view, String url) {
+                browserUrlText.setText(url);
+                // 页面加载完自动读内容
+                new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                    readCurrentPage();
+                }, 1500);
+            }
+        });
         webView.loadUrl(url);
         // 调整位置在主浮窗下方
         browserParams.x = p.x;
@@ -919,7 +803,7 @@ public class FloatService extends Service {
             }
         });
         webView.setLayoutParams(new LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, 350));
+            ViewGroup.LayoutParams.MATCH_PARENT, 250));
         layout.addView(webView);
 
         browserView = layout;
@@ -984,7 +868,6 @@ public class FloatService extends Service {
             "(function() { return document.body.innerText.substring(0, 8000); })();",
             value -> {
                 String text = value != null ? value.trim() : "";
-                // 去掉 JS 返回的引号包裹
                 if (text.startsWith("\"") && text.endsWith("\"")) {
                     text = text.substring(1, text.length() - 1);
                 }
@@ -993,6 +876,8 @@ public class FloatService extends Service {
                 final String result = text;
                 appendAIOutput("📖 页面内容:\n" + result.substring(0, Math.min(result.length(), 500)));
                 aiAgent.submitToolResult("read_page", "当前浏览器页面的文字内容：\n" + result, aiCallback);
+                // 读完自动关浏览器
+                new Handler(Looper.getMainLooper()).postDelayed(() -> hideBrowser(), 500);
             }
         );
     }
@@ -1034,8 +919,7 @@ public class FloatService extends Service {
         dp.type = Build.VERSION.SDK_INT >= 26 ?
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY :
                 WindowManager.LayoutParams.TYPE_PHONE;
-        dp.flags = WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
-                | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS;
+        dp.flags = WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL;
         dp.format = PixelFormat.TRANSLUCENT;
         dp.gravity = Gravity.CENTER;
         dp.width = (int) (getResources().getDisplayMetrics().widthPixels * 0.8f);
