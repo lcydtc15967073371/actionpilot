@@ -655,9 +655,9 @@ public class FloatService extends Service {
 
     private void setAIStopButtonVisible(boolean visible) {
         if (btnStopAI != null) {
-            btnStopAI.setTextColor(visible ? 0xFFFF6666 : 0x66444444);
+            btnStopAI.setTextColor(visible ? 0xFF4488FF : 0x664466AA);
             btnStopAI.setBackgroundTintList(
-                android.content.res.ColorStateList.valueOf(visible ? 0xFF663333 : 0xFF333333));
+                android.content.res.ColorStateList.valueOf(visible ? 0xFF224488 : 0xFF223355));
         }
     }
 
@@ -991,7 +991,8 @@ public class FloatService extends Service {
 
     private void learnExperience(String key, String value) {
         if (!key.isEmpty() && !value.isEmpty()) {
-            appendAIOutput("📚 已记住: " + key);
+            aiAgent.addMemory(key, value);
+            appendAIOutput("📚 已记住: " + key + " = " + value);
         }
     }
 

@@ -122,7 +122,7 @@ public class AIAgent {
 
         JSONObject body = new JSONObject();
         body.put("model", model);
-        body.put("temperature", 0.1);
+        body.put("temperature", 0.0);
         body.put("max_tokens", 4096);
 
         JSONArray messages = new JSONArray();
@@ -289,6 +289,12 @@ public class AIAgent {
     private void resetCancelState() {
         cancelled = false;
         currentConnection = null;
+    }
+
+    public void addMemory(String key, String value) {
+        if (key != null && value != null && !key.isEmpty() && !value.isEmpty()) {
+            memory.put(key, value);
+        }
     }
 
     public boolean isCancelled() {

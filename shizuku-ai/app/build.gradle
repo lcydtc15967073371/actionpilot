@@ -11,8 +11,8 @@ android {
         applicationId "com.shizuku.ai"
         minSdk 24
         targetSdk 32
-        versionCode 10
-        versionName "1.6.3"
+        versionCode 12
+        versionName "1.6.5"
     }
 
     buildTypes {
