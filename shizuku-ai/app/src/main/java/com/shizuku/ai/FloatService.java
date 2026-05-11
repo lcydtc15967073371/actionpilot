@@ -92,6 +92,10 @@ public class FloatService extends Service {
     // 窗口高度限制
     private int maxWindowHeight;
 
+    // 计划执行门：AI 必须先 plan_operation 才能 click_screen
+    private boolean planRequired = false;
+    private String pendingPlanGoal = "";
+
     // UI 操作录制
     private UiMapRecorder uiMapRecorder;
     private boolean isRecording = false;
@@ -823,6 +827,36 @@ public class FloatService extends Service {
         int x = params.optInt("x", 0);
         int y = params.optInt("y", 0);
         String actionLabel = action.equals("back") ? "返回" : "点击 (" + x + ", " + y + ")";
+
+        // ===== 计划执行门：必须先规划才能点击（返回键不需要规划） =====
+        if (planRequired && !action.equals("back")) {
+            appendAIOutput("⚠️ 需先规划再点击");
+            new Thread(() -> {
+                String screenText = ShizukuAccessibilityService.lastScreenText;
+                String structure = ShizukuAccessibilityService.lastScreenStructure;
+                String uimapData = "";
+                if (uiMapRecorder != null && uiMapRecorder.getTotalActions() > 0) {
+                    uimapData = uiMapRecorder.exportForAI();
+                }
+                StringBuilder ctx = new StringBuilder();
+                ctx.append("⚠️ 必须先调用 plan_operation 做规划才能点击！\n\n");
+                ctx.append("用户目标: ").append(pendingPlanGoal).append("\n\n");
+                ctx.append("当前应用: ").append(ShizukuAccessibilityService.currentAppName).append("\n");
+                if (screenText != null && !screenText.isEmpty()) {
+                    ctx.append("屏幕文字: ").append(screenText).append("\n");
+                }
+                if (structure != null && !structure.isEmpty()) {
+                    ctx.append("可见控件:\n").append(structure).append("\n");
+                }
+                if (!uimapData.isEmpty()) {
+                    ctx.append("\n操作地图:\n").append(uimapData).append("\n");
+                }
+                ctx.append("\n请分析当前屏幕，规划点击步骤后再执行。");
+                aiAgent.submitToolResult("plan_enforcement", ctx.toString(), aiCallback);
+            }).start();
+            return;
+        }
+
         appendAIOutput("👆 " + actionLabel);
 
         // 构建命令
@@ -872,6 +906,7 @@ public class FloatService extends Service {
 
     /** plan_operation：收集当前界面 + 操作地图，让 AI 规划后再执行 */
     private void planOperation(String goal, String app) {
+        planRequired = false;
         appendAIOutput("🗺️ 分析: " + (app.isEmpty() ? goal : app + " - " + goal));
         new Thread(() -> {
             try {
@@ -1018,6 +1053,8 @@ public class FloatService extends Service {
         AdbCommands.init(this);
 
         // 把文本包装一下，让AI先去查记忆
+        pendingPlanGoal = text;
+        planRequired = true;
         aiAgent.sendMessage(text, aiCallback);
     }
 
