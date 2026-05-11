@@ -73,6 +73,8 @@ public class FloatService extends Service {
     private ShizukuShellExecutor shellExecutor;
     private AIAgent aiAgent;
     private AIAgent.AICallback aiCallback;
+    private boolean isAIProcessing = false;
+    private android.widget.Button btnStopAI;
 
     // 悬浮球相关
     private View ballView;
@@ -92,6 +94,8 @@ public class FloatService extends Service {
 
     // UI 操作录制
     private UiMapRecorder uiMapRecorder;
+    private boolean isRecording = false;
+    private android.widget.Button btnToggleRecording;
     private Handler recorderHandler = new Handler(Looper.getMainLooper());
     private Runnable dumpsysPoller;
     private boolean dumpsysPolling = false;
@@ -173,6 +177,11 @@ public class FloatService extends Service {
         v.findViewById(R.id.btn_ai_clear).setOnClickListener(vv -> clearAIChat());
         btnTokenSetup.setOnClickListener(vv -> showTokenDialog());
         v.findViewById(R.id.btn_minimize_ball).setOnClickListener(vv -> minimizeToBall());
+        btnToggleRecording = v.findViewById(R.id.btn_toggle_recording);
+        btnToggleRecording.setOnClickListener(vv -> toggleRecording());
+        btnStopAI = v.findViewById(R.id.btn_stop_ai);
+        btnStopAI.setOnClickListener(vv -> stopAI());
+        setAIStopButtonVisible(false);
     v.findViewById(R.id.btn_close).setOnClickListener(vv -> {
         // 彻底关闭：清空焦点 + 清空AI对话 + 停掉所有线程 + 销毁悬浮窗
         cancelFocusBeforeExit();
@@ -293,8 +302,8 @@ public class FloatService extends Service {
                     return true;
                 case MotionEvent.ACTION_UP:
                     if (!ballDragging) {
-                        // 点击：展开为完整浮窗，停止录制
-                        stopUiRecording();
+                        // 点击：展开为完整浮窗
+                        isBallMode = false;
                         hideBallOverlay();
                         showFloatWindow();
                     }
@@ -327,9 +336,6 @@ public class FloatService extends Service {
         } catch (Exception e) {
             ballView = null;
         }
-
-        // 启动 UI 录制
-        startUiRecording();
     }
 
     private WindowManager.LayoutParams ballParams;
@@ -348,11 +354,36 @@ public class FloatService extends Service {
     }
 
     private void minimizeToBall() {
+        isBallMode = true;
         if (v != null) {
             v.setVisibility(View.GONE);
         }
         hideKeyboard();
         showBallOverlay();
+    }
+
+    /** 切换 UI 录制开关 */
+    private void toggleRecording() {
+        if (!isRecording) {
+            startUiRecording();
+            isRecording = true;
+            if (btnToggleRecording != null) {
+                btnToggleRecording.setText("🔴");
+                btnToggleRecording.setBackgroundTintList(
+                    android.content.res.ColorStateList.valueOf(0xFF884444));
+            }
+            appendAIOutput("🔴 录制已开始");
+            minimizeToBall();
+        } else {
+            stopUiRecording();
+            isRecording = false;
+            if (btnToggleRecording != null) {
+                btnToggleRecording.setText("⭕");
+                btnToggleRecording.setBackgroundTintList(
+                    android.content.res.ColorStateList.valueOf(0xFF444444));
+            }
+            appendAIOutput("⭕ 录制已停止");
+        }
     }
 
     // ====== UI 录制 ======
@@ -612,6 +643,24 @@ public class FloatService extends Service {
         setFocusDismissOverlayEnabled(false);
     }
 
+    /** 停止 AI 当前请求 */
+    private void stopAI() {
+        if (aiAgent != null) {
+            aiAgent.cancelCurrentRequest();
+        }
+        setAIStopButtonVisible(false);
+        isAIProcessing = false;
+        appendAIOutput("⏹️ 已停止");
+    }
+
+    private void setAIStopButtonVisible(boolean visible) {
+        if (btnStopAI != null) {
+            btnStopAI.setTextColor(visible ? 0xFFFF6666 : 0x66444444);
+            btnStopAI.setBackgroundTintList(
+                android.content.res.ColorStateList.valueOf(visible ? 0xFF663333 : 0xFF333333));
+        }
+    }
+
     private void exec() {
         String cmd = input.getText().toString().trim();
         if (cmd.length() == 0) return;
@@ -659,6 +708,8 @@ public class FloatService extends Service {
         aiCallback = new AIAgent.AICallback() {
             @Override
             public void onResponse(String text) {
+                setAIStopButtonVisible(false);
+                isAIProcessing = false;
                 if (text != null && !text.isEmpty()) {
                     String brief = text;
                     if (brief.length() > 300) brief = brief.substring(0, 300) + "...";
@@ -668,6 +719,8 @@ public class FloatService extends Service {
 
             @Override
             public void onError(String error) {
+                setAIStopButtonVisible(false);
+                isAIProcessing = false;
                 appendAIOutput("❌ " + error);
             }
 
@@ -711,6 +764,9 @@ public class FloatService extends Service {
                 case "execute_shell":
                     executeShell(params.optString("command", ""));
                     break;
+                case "click_screen":
+                    clickScreen(params);
+                    break;
                 case "execute_intent":
                     executeIntent(params);
                     break;
@@ -747,6 +803,59 @@ public class FloatService extends Service {
             ShellResult result = ShizukuShell.exec(command);
             String output = result.output.length() > 0 ? result.output : "(无输出)";
             aiAgent.submitToolResult("execute_shell", "退出码:" + result.exitCode + "\n" + output, aiCallback);
+        }).start();
+    }
+
+    /** 点击屏幕坐标：浮窗自动缩小为球避免挡住点击区域，点击后恢复 */
+    private void clickScreen(JSONObject params) {
+        String action = params.optString("action", "tap");
+        int x = params.optInt("x", 0);
+        int y = params.optInt("y", 0);
+        String actionLabel = action.equals("back") ? "返回" : "点击 (" + x + ", " + y + ")";
+        appendAIOutput("👆 " + actionLabel);
+
+        // 构建命令
+        String command;
+        switch (action) {
+            case "back":
+                command = "input keyevent KEYCODE_BACK";
+                break;
+            case "tap":
+            default:
+                command = "input tap " + x + " " + y;
+                break;
+        }
+
+        // 浮窗正显示时，先变球避免挡住点击区域
+        boolean wasFloatVisible = (v != null && v.getVisibility() == View.VISIBLE && !isBallMode);
+        if (wasFloatVisible) {
+            minimizeToBall();
+            String finalCommand = command;
+            new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                doClickTap(finalCommand, true);
+            }, 300);
+        } else {
+            doClickTap(command, false);
+        }
+    }
+
+    private void doClickTap(String command, boolean needRestore) {
+        new Thread(() -> {
+            try {
+                ShellResult sr = ShizukuShell.exec(command);
+                String output = sr.output.length() > 0 ? sr.output : "(无输出)";
+                aiAgent.submitToolResult("click_screen", "已执行: " + command + "\n退出码:" + sr.exitCode + "\n" + output, aiCallback);
+            } catch (Exception e) {
+                aiAgent.submitToolResult("click_screen", "[错误] 执行 " + command + " 失败: " + e.getMessage(), aiCallback);
+            }
+            if (needRestore) {
+                try { Thread.sleep(100); } catch (InterruptedException ignored) {}
+                new Handler(Looper.getMainLooper()).post(() -> {
+                    isBallMode = false;
+                    hideBallOverlay();
+                    showFloatWindow();
+                });
+            }
         }).start();
     }
 
@@ -849,6 +958,8 @@ public class FloatService extends Service {
         autoCloseBrowser();
         appendAIOutput("👤 " + text);
         appendAIOutput("⏳ 思考中...");
+        isAIProcessing = true;
+        setAIStopButtonVisible(true);
 
         // 确保adb命令库已初始化
         AdbCommands.init(this);

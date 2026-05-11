@@ -53,6 +53,38 @@
             android:layout_marginEnd="2dp"
             android:contentDescription="缩小到球" />
 
+        <!-- 录制开关 -->
+        <Button
+            android:id="@+id/btn_toggle_recording"
+            android:layout_width="22dp"
+            android:layout_height="22dp"
+            android:text="⭕"
+            android:textSize="10sp"
+            android:textColor="#FFFFFF"
+            android:backgroundTint="#444444"
+            android:paddingHorizontal="0dp"
+            android:paddingVertical="0dp"
+            android:minWidth="0dp"
+            android:minHeight="0dp"
+            android:layout_marginEnd="2dp"
+            android:contentDescription="录制开关" />
+
+        <!-- AI 停止按钮 -->
+        <Button
+            android:id="@+id/btn_stop_ai"
+            android:layout_width="22dp"
+            android:layout_height="22dp"
+            android:text="■"
+            android:textSize="10sp"
+            android:textColor="#FF6666"
+            android:backgroundTint="#663333"
+            android:paddingHorizontal="0dp"
+            android:paddingVertical="0dp"
+            android:minWidth="0dp"
+            android:minHeight="0dp"
+            android:layout_marginEnd="2dp"
+            android:contentDescription="停止AI" />
+
         <!-- 关闭按钮 -->
         <ImageButton
             android:id="@+id/btn_close"

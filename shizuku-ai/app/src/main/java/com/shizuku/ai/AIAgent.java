@@ -33,6 +33,8 @@ public class AIAgent {
     private final ShizukuShellExecutor shellExecutor;
     private final List<Message> conversationHistory = new ArrayList<>();
     private final Map<String, String> memory = new HashMap<>();
+    private volatile boolean cancelled = false;
+    private HttpURLConnection currentConnection = null;
 
     // ===== 工具清单（工具说明书） =====
     private static final String TOOL_MANIFEST = "" +
@@ -45,7 +47,7 @@ public class AIAgent {
         "1. search_web | 联网搜索 | params: {\"query\": \"搜索关键词\"}\n" +
         "2. browse_url | 在浏览器打开网页 | params: {\"url\": \"https://...\"}\n" +
         "3. read_page | 读取当前浏览器页面的文字内容 | params: {}\n" +
-        "4. read_screen | 读取手机当前屏幕 UI 布局（无障碍）。返回当前应用+屏幕文字+控件列表（控件类型、标签、坐标bounds、可点击标记）。AI 可用坐标配合 input tap 点击（如 Button \"搜索\" [100,200,300,400] clickable → input tap 250 300）。无参数 | params: {}\n" +
+        "4. read_screen | 读取手机当前屏幕 UI 布局（无障碍）。返回当前应用+屏幕文字+控件列表（控件类型、标签、坐标bounds、可点击标记）。需要点击时用 click_screen 工具。无参数 | params: {}\n" +
         "5. start_app | 打开应用 | params: {\"package\": \"com.example.app\"}\n" +
         "6. list_apps | 列出已安装应用 | params: {\"keyword\": \"可选搜索词\"}\n" +
         "7. toggle_flashlight | 切换手电筒开关 | params: {}\n" +
@@ -54,12 +56,16 @@ public class AIAgent {
         "10. execute_intent | 执行Android Intent | params: {\"action\": \"android.intent.action.XXX\", \"extras\": {...}}\n" +
         "11. learn | 记住一条经验 | params: {\"key\": \"事项\", \"value\": \"内容\"}\n" +
         "12. get_device_info | 获取设备信息 | params: {}\n" +
-        "13. read_uimap | 读取手机UI操作地图——获取用户最近操作过的App、页面、点击记录等完整操作路径历史 | params: {}\n" +
+        "13. read_uimap | 读取UI操作地图——返回用户最近操作过的App列表、页面流转、点击记录等完整操作路径历史。结合 read_screen 了解当前界面后，用 read_uimap 理解整体页面结构，再用 click_screen 执行点击 | params: {}\n" +
         "14. create_note | 创建原子笔记（vivo 原子笔记），预填内容并打开编辑界面 | params: {\"content\": \"笔记内容\", \"title\": \"可选标题\"}\n" +
+        "15. click_screen | 点击屏幕或执行导航操作。浮窗自动缩小避免挡住点击区域，点击后自动恢复。支持多种动作：tap=点击坐标, back=返回上一页。先调 read_screen 获取控件坐标bounds，再用此工具。不要用 execute_shell input tap/keyevent | params: {\"action\": \"tap\", \"x\": 250, \"y\": 300} 或 {\"action\": \"back\"}\n" +
         "\n使用原则：\n" +
         "- 能用工具有现成工具的，优先用工具，不自己编命令\n" +
         "- 搜索后用 browse_url 打开结果链接查看详情\n" +
         "- 不清楚包名时先用 list_apps 查\n" +
+        "- 点击屏幕的标准流程：先 read_screen 获取当前界面控件坐标 → 再用 click_screen action=tap 点击（不要用 execute_shell input tap）\n" +
+        "- 需要返回上一页用 click_screen action=back，不要用 execute_shell input keyevent\n" +
+        "- 理解 App 操作流程：先 read_screen 看当前界面，再 read_uimap 看操作历史地图，两者配合\n" +
         "- 如果一个工具调用返回的结果显示需要后续操作，继续调用下一个工具";
 
     public interface AICallback {
@@ -84,25 +90,33 @@ public class AIAgent {
             callback.onError("请先设置API Token！");
             return;
         }
+        resetCancelState();
         conversationHistory.add(new Message("user", userInput));
         executor.execute(() -> {
             try {
+                if (cancelled) return;
                 callAIAPI(callback, false);
             } catch (Exception e) {
-                mainHandler.post(() -> callback.onError("API调用失败: " + e.getMessage()));
+                if (!cancelled) {
+                    mainHandler.post(() -> callback.onError("API调用失败: " + e.getMessage()));
+                }
             }
         });
     }
 
     /** 提交工具执行结果给AI */
     public void submitToolResult(String toolName, String result, AICallback callback) {
+        if (cancelled) return;
         conversationHistory.add(new Message("system",
             "[工具: " + toolName + "] 执行结果:\n" + result));
         executor.execute(() -> {
             try {
+                if (cancelled) return;
                 callAIAPI(callback, true);
             } catch (Exception e) {
-                mainHandler.post(() -> callback.onError("API调用失败: " + e.getMessage()));
+                if (!cancelled) {
+                    mainHandler.post(() -> callback.onError("API调用失败: " + e.getMessage()));
+                }
             }
         });
     }
@@ -159,6 +173,8 @@ public class AIAgent {
         Log.d(TAG, "调用API: " + endpoint);
         URL url = new URL(endpoint);
         HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+        currentConnection = conn;
+        if (cancelled) { conn.disconnect(); return; }
         conn.setRequestMethod("POST");
         conn.setRequestProperty("Authorization", "Bearer " + token);
         conn.setRequestProperty("Content-Type", "application/json");
@@ -200,6 +216,7 @@ public class AIAgent {
 
     /** 解析AI响应：检测JSON工具调用，否则当纯文本 */
     private void parseResponse(String content, AICallback callback) {
+        if (cancelled) return;
         String trimmed = content.trim();
         String textPart = "";
         String jsonPart = trimmed;
@@ -272,7 +289,26 @@ public class AIAgent {
         mainHandler.post(() -> callback.onResponse(trimmed));
     }
 
+    /** 取消当前正在进行的 AI 请求 */
+    public void cancelCurrentRequest() {
+        cancelled = true;
+        if (currentConnection != null) {
+            try { currentConnection.disconnect(); } catch (Exception ignored) {}
+        }
+    }
+
+    /** 重置取消状态（每次新请求前调用） */
+    private void resetCancelState() {
+        cancelled = false;
+        currentConnection = null;
+    }
+
+    public boolean isCancelled() {
+        return cancelled;
+    }
+
     public void shutdown() {
+        cancelCurrentRequest();
         executor.shutdownNow();
         conversationHistory.clear();
         Log.d(TAG, "AI代理已关闭");
