@@ -709,6 +709,9 @@ public class FloatService extends Service {
                 case "get_device_info":
                     getDeviceInfo();
                     break;
+                case "create_note":
+                    createNote(params.optString("content", ""), params.optString("title", ""));
+                    break;
                 case "read_uimap":
                     readUiMap();
                     break;
@@ -785,6 +788,25 @@ public class FloatService extends Service {
         String summary = "UI 操作地图已生成，共 " + uiMapRecorder.getTotalActions() + " 条操作记录。\n" + exported;
         appendAIOutput("🗺️ " + summary.substring(0, Math.min(summary.length(), 500)));
         aiAgent.submitToolResult("read_uimap", summary, aiCallback);
+    }
+
+    private void createNote(String content, String title) {
+        if (content.isEmpty()) {
+            aiAgent.submitToolResult("create_note", "[错误] 内容不能为空", aiCallback);
+            return;
+        }
+        // 先尝试带标题的 SEND 方式
+        String cmd = "am start -a android.intent.action.SEND -t text/plain"
+            + " --es android.intent.extra.TEXT \"" + content.replace("\"", "\\\"") + "\""
+            + " -p com.android.notes";
+        if (!title.isEmpty()) {
+            cmd += " --es android.intent.extra.SUBJECT \"" + title.replace("\"", "\\\"") + "\"";
+        }
+        ShellResult sr = ShizukuShell.exec(cmd);
+        String msg = "📝 已打开原子笔记编辑界面，内容已预填";
+        if (!title.isEmpty()) msg += "（标题：" + title + "）";
+        appendAIOutput(msg);
+        aiAgent.submitToolResult("create_note", msg + "。请提醒用户手动保存。执行结果: " + sr.output, aiCallback);
     }
 
     private void getDeviceInfo() {
