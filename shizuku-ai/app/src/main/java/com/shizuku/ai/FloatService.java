@@ -231,7 +231,7 @@ public class FloatService extends Service {
         int sh = getResources().getDisplayMetrics().heightPixels;
         maxWindowHeight = (int) (sh * 0.6f);
         p.width = (int) (sw * 0.55f);
-        p.height = WindowManager.LayoutParams.WRAP_CONTENT;
+        p.height = maxWindowHeight;
         p.x = sw - p.width - 10;
         p.y = sh / 3 + 5;
 
@@ -293,7 +293,8 @@ public class FloatService extends Service {
                     return true;
                 case MotionEvent.ACTION_UP:
                     if (!ballDragging) {
-                        // 点击：展开为完整浮窗
+                        // 点击：展开为完整浮窗，停止录制
+                        stopUiRecording();
                         hideBallOverlay();
                         showFloatWindow();
                     }
@@ -317,7 +318,8 @@ public class FloatService extends Service {
         ballParams.gravity = Gravity.TOP | Gravity.START;
         ballParams.width = ballPx;
         ballParams.height = ballPx;
-        ballParams.x = sw / 2 - ballPx / 2;
+        int marginPx = (int)(16 * density);
+        ballParams.x = sw - ballPx - marginPx;
         ballParams.y = getResources().getDisplayMetrics().heightPixels / 2 - ballPx / 2;
 
         try {
@@ -1376,22 +1378,8 @@ public class FloatService extends Service {
             }
             aiOutput.append("━━━━━━━━━━━━━━━━\n");
             aiOutput.append(text);
-            constrainWindowHeight();
             // 不调 fullScroll，避免抢焦点
         });
-    }
-
-    /** 限制浮窗最大高度，对话过多时不会顶出屏幕 */
-    private void constrainWindowHeight() {
-        if (v == null || !v.isAttachedToWindow() || maxWindowHeight <= 0) return;
-        if (v.getHeight() > maxWindowHeight) {
-            p.height = maxWindowHeight;
-            try { wm.updateViewLayout(v, p); } catch (Exception ignored) {}
-            // 恢复 WRAP_CONTENT，下次内容少时能自动缩小
-        } else if (v.getHeight() <= maxWindowHeight && p.height != WindowManager.LayoutParams.WRAP_CONTENT) {
-            p.height = WindowManager.LayoutParams.WRAP_CONTENT;
-            try { wm.updateViewLayout(v, p); } catch (Exception ignored) {}
-        }
     }
 
     /** 显示Token设置对话框 */
