@@ -36,37 +36,25 @@ public class AIAgent {
     private volatile boolean cancelled = false;
     private HttpURLConnection currentConnection = null;
 
-    // ===== 工具清单（工具说明书） =====
+    // ===== 工具清单 =====
     private static final String TOOL_MANIFEST = "" +
-        "你有以下工具可用。需要执行操作时，输出如下JSON格式，不要加多余标记：\n" +
-        "{\"tool\":\"工具名\",\"params\":{...}}\n" +
-        "需要执行多个操作时，输出JSON数组：\n" +
-        "[{\"tool\":\"...\",\"params\":{...}},{\"tool\":\"...\",\"params\":{...}}]\n" +
-        "纯文本回复正常说话即可。不是所有问题都需要用工具，闲聊直接回复。\n\n" +
-        "可用工具：\n" +
-        "1. search_web | 联网搜索 | params: {\"query\": \"搜索关键词\"}\n" +
-        "2. browse_url | 在浏览器打开网页 | params: {\"url\": \"https://...\"}\n" +
-        "3. read_page | 读取当前浏览器页面的文字内容 | params: {}\n" +
-        "4. read_screen | 读取手机当前屏幕 UI 布局（无障碍）。返回当前应用+屏幕文字+控件列表（控件类型、标签、坐标bounds、可点击标记）。需要点击时用 click_screen 工具。无参数 | params: {}\n" +
-        "5. start_app | 打开应用 | params: {\"package\": \"com.example.app\"}\n" +
-        "6. list_apps | 列出已安装应用 | params: {\"keyword\": \"可选搜索词\"}\n" +
-        "7. toggle_flashlight | 切换手电筒开关 | params: {}\n" +
-        "8. set_alarm | 设置闹钟 | params: {\"hour\": 12, \"minutes\": 0, \"message\": \"可选标签\"}\n" +
-        "9. execute_shell | 执行Shell命令 | params: {\"command\": \"shell命令\"}\n" +
-        "10. execute_intent | 执行Android Intent | params: {\"action\": \"android.intent.action.XXX\", \"extras\": {...}}\n" +
-        "11. learn | 记住一条经验 | params: {\"key\": \"事项\", \"value\": \"内容\"}\n" +
-        "12. get_device_info | 获取设备信息 | params: {}\n" +
-        "13. read_uimap | 读取UI操作地图——返回用户最近操作过的App列表、页面流转、点击记录等完整操作路径历史。结合 read_screen 了解当前界面后，用 read_uimap 理解整体页面结构，再用 click_screen 执行点击 | params: {}\n" +
-        "14. create_note | 创建原子笔记（vivo 原子笔记），预填内容并打开编辑界面 | params: {\"content\": \"笔记内容\", \"title\": \"可选标题\"}\n" +
-        "15. click_screen | 点击屏幕或执行导航操作。浮窗自动缩小避免挡住点击区域，点击后自动恢复。支持多种动作：tap=点击坐标, back=返回上一页。先调 read_screen 获取控件坐标bounds，再用此工具。不要用 execute_shell input tap/keyevent | params: {\"action\": \"tap\", \"x\": 250, \"y\": 300} 或 {\"action\": \"back\"}\n" +
-        "\n使用原则：\n" +
-        "- 能用工具有现成工具的，优先用工具，不自己编命令\n" +
-        "- 搜索后用 browse_url 打开结果链接查看详情\n" +
-        "- 不清楚包名时先用 list_apps 查\n" +
-        "- 点击屏幕的标准流程：先 read_screen 获取当前界面控件坐标 → 再用 click_screen action=tap 点击（不要用 execute_shell input tap）\n" +
-        "- 需要返回上一页用 click_screen action=back，不要用 execute_shell input keyevent\n" +
-        "- 理解 App 操作流程：先 read_screen 看当前界面，再 read_uimap 看操作历史地图，两者配合\n" +
-        "- 如果一个工具调用返回的结果显示需要后续操作，继续调用下一个工具";
+        "输出格式：{\"tool\":\"工具名\",\"params\":{...}} 或数组格式。纯文本直接回复。\n\n" +
+        "1. search_web | 搜索 | params: {\"query\": \"\"}\n" +
+        "2. browse_url | 打开网页 | params: {\"url\": \"\"}\n" +
+        "3. read_page | 读浏览器页面内容 | params: {}\n" +
+        "4. read_screen | 读当前屏幕UI（文字+控件坐标bounds） | params: {}\n" +
+        "5. start_app | 打开应用 | params: {\"package\": \"\"}\n" +
+        "6. list_apps | 列出应用 | params: {\"keyword\": \"\"}\n" +
+        "7. toggle_flashlight | 手电筒开关 | params: {}\n" +
+        "8. set_alarm | 设闹钟 | params: {\"hour\": 0, \"minutes\": 0, \"message\": \"\"}\n" +
+        "9. execute_shell | 执行Shell命令 | params: {\"command\": \"\"}\n" +
+        "10. execute_intent | 执行Intent | params: {\"action\": \"\", \"extras\": {...}}\n" +
+        "11. learn | 记住经验 | params: {\"key\": \"\", \"value\": \"\"}\n" +
+        "12. get_device_info | 设备信息 | params: {}\n" +
+        "13. read_uimap | 读UI操作历史地图 | params: {}\n" +
+        "14. create_note | 创建原子笔记 | params: {\"content\": \"\", \"title\": \"\"}\n" +
+        "15. click_screen | 点击/返回。浮窗自动缩球防挡屏。action: tap=x,y坐标 back=返回 | params: {\"action\": \"tap\", \"x\": 0, \"y\": 0} 或 {\"action\": \"back\"}\n" +
+        "16. plan_operation | 【操作App前必调】获取当前屏幕+UI地图，综合分析后输出操作计划再执行 | params: {\"goal\": \"\", \"app\": \"\"}";
 
     public interface AICallback {
         void onResponse(String text);

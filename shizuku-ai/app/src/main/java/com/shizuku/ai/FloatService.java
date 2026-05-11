@@ -779,6 +779,9 @@ public class FloatService extends Service {
                 case "read_uimap":
                     readUiMap();
                     break;
+                case "plan_operation":
+                    planOperation(params.optString("goal", ""), params.optString("app", ""));
+                    break;
                 case "learn":
                     learnExperience(params.optString("key", ""), params.optString("value", ""));
                     break;
@@ -793,16 +796,24 @@ public class FloatService extends Service {
 
     private void startAppByPackage(String pkg) {
         appendAIOutput("📱 打开: " + pkg);
-        ShellResult sr = ShizukuShell.exec("monkey -p " + pkg + " 1");
-        aiAgent.submitToolResult("start_app", sr.output, aiCallback);
+        try {
+            ShellResult sr = ShizukuShell.exec("monkey -p " + pkg + " 1");
+            aiAgent.submitToolResult("start_app", sr.output, aiCallback);
+        } catch (Exception e) {
+            aiAgent.submitToolResult("start_app", "[错误] " + e.getMessage(), aiCallback);
+        }
     }
 
     private void executeShell(String command) {
         appendAIOutput("📋 执行: " + command);
         new Thread(() -> {
-            ShellResult result = ShizukuShell.exec(command);
-            String output = result.output.length() > 0 ? result.output : "(无输出)";
-            aiAgent.submitToolResult("execute_shell", "退出码:" + result.exitCode + "\n" + output, aiCallback);
+            try {
+                ShellResult result = ShizukuShell.exec(command);
+                String output = result.output.length() > 0 ? result.output : "(无输出)";
+                aiAgent.submitToolResult("execute_shell", "退出码:" + result.exitCode + "\n" + output, aiCallback);
+            } catch (Exception e) {
+                aiAgent.submitToolResult("execute_shell", "[错误] " + e.getMessage(), aiCallback);
+            }
         }).start();
     }
 
@@ -855,6 +866,47 @@ public class FloatService extends Service {
                     hideBallOverlay();
                     showFloatWindow();
                 });
+            }
+        }).start();
+    }
+
+    /** plan_operation：收集当前界面 + 操作地图，让 AI 规划后再执行 */
+    private void planOperation(String goal, String app) {
+        appendAIOutput("🗺️ 分析: " + (app.isEmpty() ? goal : app + " - " + goal));
+        new Thread(() -> {
+            try {
+                // 1. 获取当前屏幕内容
+                String screenText = ShizukuAccessibilityService.lastScreenText;
+                String structure = ShizukuAccessibilityService.lastScreenStructure;
+                String currentApp = ShizukuAccessibilityService.currentAppName;
+
+                // 2. 获取 UI 操作地图
+                String uimapData = "";
+                if (uiMapRecorder != null && uiMapRecorder.getTotalActions() > 0) {
+                    uimapData = uiMapRecorder.exportForAI();
+                }
+
+                // 3. 组装信息
+                StringBuilder info = new StringBuilder();
+                info.append("=== 当前屏幕信息 ===\n");
+                if (currentApp != null) info.append("当前应用: ").append(currentApp).append("\n");
+                if (screenText != null && !screenText.isEmpty()) {
+                    info.append("屏幕文字: ").append(screenText).append("\n");
+                }
+                if (structure != null && !structure.isEmpty()) {
+                    info.append("可见控件:\n").append(structure).append("\n");
+                }
+                if (!uimapData.isEmpty()) {
+                    info.append("\n=== UI 操作地图 ===\n").append(uimapData).append("\n");
+                }
+                info.append("\n=== 用户目标 ===\n").append(goal);
+                if (!app.isEmpty()) info.append("\n目标应用: ").append(app);
+
+                String resultStr = info.toString();
+                appendAIOutput("🗺️ " + resultStr.substring(0, Math.min(resultStr.length(), 500)));
+                aiAgent.submitToolResult("plan_operation", resultStr, aiCallback);
+            } catch (Exception e) {
+                aiAgent.submitToolResult("plan_operation", "[错误] " + e.getMessage(), aiCallback);
             }
         }).start();
     }
