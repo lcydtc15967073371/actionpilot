@@ -86,6 +86,13 @@ public class FloatService extends Service {
     private TextView browserUrlText;
     private WindowManager.LayoutParams browserParams;
 
+    // UI 操作录制
+    private UiMapRecorder uiMapRecorder;
+    private Handler recorderHandler = new Handler(Looper.getMainLooper());
+    private Runnable dumpsysPoller;
+    private boolean dumpsysPolling = false;
+    private String lastDumpsysFocus = "";
+
     @Override
     public void onCreate() {
         super.onCreate();
@@ -312,6 +319,9 @@ public class FloatService extends Service {
         } catch (Exception e) {
             ballView = null;
         }
+
+        // 启动 UI 录制
+        startUiRecording();
     }
 
     private WindowManager.LayoutParams ballParams;
@@ -335,6 +345,102 @@ public class FloatService extends Service {
         }
         hideKeyboard();
         showBallOverlay();
+    }
+
+    // ====== UI 录制 ======
+
+    private void startUiRecording() {
+        if (uiMapRecorder == null) {
+            uiMapRecorder = new UiMapRecorder(this);
+        }
+        // 注册到无障碍服务
+        ShizukuAccessibilityService.uiMapRecorder = uiMapRecorder;
+        uiMapRecorder.start();
+        startDumpsysPolling();
+    }
+
+    private void stopUiRecording() {
+        stopDumpsysPolling();
+        ShizukuAccessibilityService.uiMapRecorder = null;
+        if (uiMapRecorder != null) {
+            uiMapRecorder.stop();
+        }
+    }
+
+    /** Shizuku dumpsys 轮询作为窗口切换的 fallback */
+    private void startDumpsysPolling() {
+        if (dumpsysPolling) return;
+        dumpsysPolling = true;
+        dumpsysPoller = new Runnable() {
+            @Override
+            public void run() {
+                if (!dumpsysPolling) return;
+                try {
+                    ShellResult sr = ShizukuShell.exec("dumpsys window | grep mCurrentFocus");
+                    String focus = parseDumpsysFocus(sr.output);
+                    if (!focus.isEmpty() && !focus.equals(lastDumpsysFocus)) {
+                        lastDumpsysFocus = focus;
+                        String[] parts = focus.split("/");
+                        if (parts.length >= 2) {
+                            String pkg = parts[0];
+                            int dotIdx = parts[1].lastIndexOf('.');
+                            String activity = dotIdx >= 0 ? parts[1].substring(dotIdx + 1) : parts[1];
+                            // 如果无障碍服务还没上报，手动触发录制
+                            if (!pkg.equals(ShizukuAccessibilityService.currentPackage)) {
+                                String appName = resolveAppName(pkg);
+                                ShizukuAccessibilityService.currentPackage = pkg;
+                                ShizukuAccessibilityService.currentAppName = appName;
+                                uiMapRecorder.onWindowChanged(pkg, appName, activity);
+                            }
+                        }
+                    }
+                } catch (Exception ignored) {}
+                recorderHandler.postDelayed(this, 1500);
+            }
+        };
+        recorderHandler.postDelayed(dumpsysPoller, 1000);
+    }
+
+    private void stopDumpsysPolling() {
+        dumpsysPolling = false;
+        if (dumpsysPoller != null) {
+            recorderHandler.removeCallbacks(dumpsysPoller);
+        }
+    }
+
+    private String parseDumpsysFocus(String output) {
+        String[] lines = output.split("\n");
+        for (String line : lines) {
+            if (line.contains("mCurrentFocus=") && !line.contains("null")) {
+                int braceOpen = line.indexOf('{');
+                int braceClose = line.lastIndexOf('}');
+                if (braceOpen < 0 || braceClose <= braceOpen) continue;
+                String inside = line.substring(braceOpen + 1, braceClose);
+                String[] parts = inside.split(" ");
+                int u0Idx = -1;
+                for (int i = 0; i < parts.length; i++) {
+                    if ("u0".equals(parts[i])) { u0Idx = i; break; }
+                }
+                if (u0Idx < 0 || u0Idx + 1 >= parts.length) continue;
+                StringBuilder pkgAct = new StringBuilder();
+                for (int i = u0Idx + 1; i < parts.length; i++) {
+                    if (parts[i].startsWith("type=")) break;
+                    if (pkgAct.length() > 0) pkgAct.append(" ");
+                    pkgAct.append(parts[i]);
+                }
+                return pkgAct.toString();
+            }
+        }
+        return "";
+    }
+
+    private String resolveAppName(String pkg) {
+        try {
+            android.content.pm.ApplicationInfo ai = getPackageManager().getApplicationInfo(pkg, 0);
+            return getPackageManager().getApplicationLabel(ai).toString();
+        } catch (Exception e) {
+            return pkg;
+        }
     }
 
     /** 复制文本到剪贴板 */
@@ -603,6 +709,9 @@ public class FloatService extends Service {
                 case "get_device_info":
                     getDeviceInfo();
                     break;
+                case "read_uimap":
+                    readUiMap();
+                    break;
                 case "learn":
                     learnExperience(params.optString("key", ""), params.optString("value", ""));
                     break;
@@ -658,12 +767,24 @@ public class FloatService extends Service {
     private void setAlarm(int hour, int minutes, String message) {
         String cmd = "am start -a android.intent.action.SET_ALARM"
             + " --ei android.intent.extra.alarm.HOUR " + hour
-            + " --ei android.intent.extra.alarm.MINUTES " + minutes;
+            + " --ei android.intent.extra.alarm.MINUTES " + minutes
+            + " --ez android.intent.extra.alarm.SKIP_UI true";
         if (!message.isEmpty()) {
             cmd += " -e android.intent.extra.alarm.MESSAGE \"" + message + "\"";
         }
         ShizukuShell.exec(cmd);
         aiAgent.submitToolResult("set_alarm", "闹钟已设置: " + hour + ":" + String.format("%02d", minutes) + (message.isEmpty() ? "" : " (" + message + ")"), aiCallback);
+    }
+
+    private void readUiMap() {
+        if (uiMapRecorder == null || uiMapRecorder.getTotalActions() == 0) {
+            aiAgent.submitToolResult("read_uimap", "（当前没有录制到任何操作数据，请先使用手机后再查询）", aiCallback);
+            return;
+        }
+        String exported = uiMapRecorder.exportForAI();
+        String summary = "UI 操作地图已生成，共 " + uiMapRecorder.getTotalActions() + " 条操作记录。\n" + exported;
+        appendAIOutput("🗺️ " + summary.substring(0, Math.min(summary.length(), 500)));
+        aiAgent.submitToolResult("read_uimap", summary, aiCallback);
     }
 
     private void getDeviceInfo() {
@@ -797,8 +918,8 @@ public class FloatService extends Service {
     private void listInstalledApps(final String keyword) {
         appendAIOutput("📱 扫描已安装应用...");
 
-        // 第一步：通过 Shizuku shell 执行 pm list packages -3 获取全部第三方包名（关键词过滤在Java侧做）
-        final String cmd = "pm list packages -3";
+        // 第一步：通过 Shizuku shell 获取全部包名（关键词过滤在Java侧做）
+        final String cmd = "pm list packages";
         
         shellExecutor.execute(cmd, new ShizukuShellExecutor.ShellCallback() {
             @Override
@@ -835,9 +956,7 @@ public class FloatService extends Service {
                         for (String pkg : pkgs) {
                             try {
                                 ApplicationInfo appInfo = pm.getApplicationInfo(pkg, 0);
-                                // 跳过系统应用
                                 boolean isSystem = (appInfo.flags & ApplicationInfo.FLAG_SYSTEM) != 0;
-                                if (isSystem && kw.isEmpty()) continue;
 
                                 String label = appInfo.loadLabel(pm).toString();
                                 
@@ -850,7 +969,7 @@ public class FloatService extends Service {
 
                                 sb.append("• ").append(label).append("  (").append(pkg).append(")\n");
                                 count++;
-                                if (count >= 30) { sb.append("... 还有更多\n"); break; }
+                                if (count >= 60) { sb.append("... 还有更多\n"); break; }
                             } catch (Exception ignored) {
                                 // 包可能已卸载，跳过
                             }
@@ -1206,6 +1325,7 @@ public class FloatService extends Service {
     @Override
     public void onDestroy() {
         cancelFocusBeforeExit();
+        stopUiRecording();
         hideBallOverlay();
         if (focusDismissView != null && wm != null) {
             try { wm.removeView(focusDismissView); } catch (Exception ignored) {}

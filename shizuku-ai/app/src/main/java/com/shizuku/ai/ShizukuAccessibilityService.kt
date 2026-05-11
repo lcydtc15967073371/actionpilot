@@ -37,6 +37,10 @@ class ShizukuAccessibilityService : AccessibilityService() {
             private set
         var lastClickBounds: String = ""
             private set
+
+        /** UI 操作录制器（由 FloatService 设置） */
+        @JvmField
+        var uiMapRecorder: UiMapRecorder? = null
     }
 
     private var lastContentTime = 0L
@@ -69,6 +73,10 @@ class ShizukuAccessibilityService : AccessibilityService() {
                     lastContentTime = 0
                     lastContentText = ""
                     captureScreen()
+                    // 通知录制器
+                    val screen = event.className?.toString()
+                        ?.substringAfterLast('.')?.substringBefore('$') ?: "unknown"
+                    uiMapRecorder?.onWindowChanged(pkg, currentAppName, screen)
                     Log.d(TAG, "窗口切换: $currentAppName/$pkg")
                 }
 
@@ -82,6 +90,9 @@ class ShizukuAccessibilityService : AccessibilityService() {
                     if (label.isNotBlank()) {
                         lastClickLabel = label
                         lastClickBounds = bounds
+                        val viewId = event.source?.viewIdResourceName ?: ""
+                        uiMapRecorder?.onAction("CLICK", label,
+                            if (bounds.isNotBlank()) "$bounds | $viewId" else viewId)
                         Log.d(TAG, "点击: '$label' $bounds")
                     }
                     if (System.currentTimeMillis() - lastContentTime >= 1000) {
@@ -124,6 +135,8 @@ class ShizukuAccessibilityService : AccessibilityService() {
                 lastScreenText = content
                 lastContentText = content
                 lastContentTime = System.currentTimeMillis()
+                // 通知录制器屏幕内容变化
+                uiMapRecorder?.onScreenContent(content.take(500))
                 Log.d(TAG, "屏幕内容: ${content.take(200)}")
             }
         } finally {

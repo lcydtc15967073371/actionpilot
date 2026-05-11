@@ -54,6 +54,7 @@ public class AIAgent {
         "10. execute_intent | 执行Android Intent | params: {\"action\": \"android.intent.action.XXX\", \"extras\": {...}}\n" +
         "11. learn | 记住一条经验 | params: {\"key\": \"事项\", \"value\": \"内容\"}\n" +
         "12. get_device_info | 获取设备信息 | params: {}\n" +
+        "13. read_uimap | 读取手机UI操作地图——获取用户最近操作过的App、页面、点击记录等完整操作路径历史 | params: {}\n" +
         "\n使用原则：\n" +
         "- 能用工具有现成工具的，优先用工具，不自己编命令\n" +
         "- 搜索后用 browse_url 打开结果链接查看详情\n" +
