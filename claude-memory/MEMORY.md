@@ -1,0 +1,31 @@
+- [Auto permission mode](feedback_auto_permission_mode.md) — Correct way to set auto mode (defaultMode: "auto" in settings, needs restart)
+- [Android 14 Accessibility Restriction](android14_accessibility_restriction.md) — 绕过 Android 14 无障碍服务限制的踩坑记录
+- [Shizuku Development Tips](shizuku_development_tips.md) — Shizuku 13.x API 反射调用、Provider 配置、权限流程
+- [ForegroundService Crash](android_foreground_service_crash.md) — Android 14 startForeground() 必须在 5 秒内调用
+- [ADB Dev Tips](adb_bit_development_tips.md) — ADB 版本冲突、Compose UI 测试、Gradle 构建等各类踩坑
+- [User Project Context](user_project_context.md) — 用户背景：Shizuku/PermOpener/FloatRunner 开发经验，vivo Android 14
+- [万能APP分析教训](lesson_wanneng_app_analysis.md) — 万能APP只有save没有load的bug、双通道写入经验、项目文件管理
+- [ActionPilot项目状态](actionpilot_project_status.md) — 当前项目完成度、已知问题、待办
+- [ActionPilot 产品方向](actionpilot_product_requirements.md) — 用户需求记录（App 分组、动态进度、导出格式等）
+- [ActionPilot 开发踩坑](actionpilot_dev_pitfalls.md) — 无障碍服务不显示、Restricted Settings、包可见性、settings put secure 等
+- [Gitee 仓库](gitee_repo.md) — Gitee 地址和 Token，用于国内代码备份
+- [dumpsys window 格式变化](dumpsys_window_format_change.md) — Android 14+ mCurrentFocus 格式改变
+- [用户工作风格](feedback_working_style.md) — 喜欢直接结果、给提示引导、卡顿开新对话
+- [Termux ADB 控制](termux_adb_control.md) — run-as 控制 Termux 执行命令和拉文件
+- [Shizuku AI 开发状态](shizuku_ai_dev_status.md) — 项目架构、已完成能力、待办、差异化方向
+- [Shizuku AI 构建踩坑](shizuku_ai_build_pitfalls.md) — 打包构建和安装过程中的各类踩坑
+- [Operit 工具体系完整分析](operit_tool_architecture.md) — 所有工具包的签名和用途，Architecture参考
+- [AI 工具调用架构套路](ai_tool_architecture_pattern.md) — 核心套路：给工具说明书，AI 选工具填参数，不猜命令
+- [IME 焦点浮窗问题](ime_focus_floating_window.md) — Shizuku AI 浮窗和微信间输入法焦点切换失败，参考 Operit 方案
+- [code-server Windows 安装修复](code_server_windows_fix.md) — 绕过 argon2 编译问题，在 Node 24 上安装 code-server
+- [Termux SSH 和 Claude 聊天](termux_ssh_claude.md) — 手机 Termux 通过 SSH 连接电脑运行 claude 对话
+- [Termux SSH](termux_ssh.md) — 用户从手机 Termux SSH 连接 Windows，切 App 会断连
+- [Termux + Shizuku 提权](termux_shizuku.md) — Termux 通过 Shizuku 获取 ADB 级别权限，SSH 远程调用 rish
+- [自动压缩](auto_compact.md) — Hook 模式全自动，对话超 500KB 自动 /compact，全局生效（含 Trae）
+- [开发环境](dev_environment.md) — Windows 10 已安装/缺失的开发工具
+- [Trae 项目列表](projects_trae.md) — Trae 中活跃的项目路径清单
+- [Shizuku AI SiriBall 整合](shizuku_ai_siriball_integration.md) — BallApp 的 SiriBall 悬浮球整合到 Shizuku AI 浮窗
+- [ActionPilot 录制引擎整合](shizuku_ai_actionpilot_integration.md) — UiMapRecorder + read_uimap 工具 + list_apps/set_alarm 修复
+- [SSH 僵尸连接清理脚本](kill_zombie_ssh_script.md) — Windows sshd CLOSE_WAIT 检测/清理 PowerShell 脚本
+- [Termux SSH 僵尸连接清理](kill_zombie_ssh_termux.md) — 手机 Termux 端 SSH 僵尸进程清理脚本
+- [Playwright CLI 配置](playwright_cli_setup.md) — @playwright/cli 安装、Chrome 145 集成、bash 配置、常用命令
