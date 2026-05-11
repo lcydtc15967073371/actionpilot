@@ -86,6 +86,9 @@ public class FloatService extends Service {
     private TextView browserUrlText;
     private WindowManager.LayoutParams browserParams;
 
+    // 窗口高度限制
+    private int maxWindowHeight;
+
     // UI 操作录制
     private UiMapRecorder uiMapRecorder;
     private Handler recorderHandler = new Handler(Looper.getMainLooper());
@@ -224,10 +227,12 @@ public class FloatService extends Service {
         p.gravity = Gravity.TOP | Gravity.START;
 
         int sw = getResources().getDisplayMetrics().widthPixels;
+        int sh = getResources().getDisplayMetrics().heightPixels;
+        maxWindowHeight = (int) (sh * 0.6f);
         p.width = (int) (sw * 0.55f);
         p.height = WindowManager.LayoutParams.WRAP_CONTENT;
         p.x = sw - p.width - 10;
-        p.y = getResources().getDisplayMetrics().heightPixels / 3 + 5;
+        p.y = sh / 3 + 5;
 
         // Operit: 先加全屏遮罩（下层），再加主浮窗（上层），确保遮罩在主浮窗之下
         ensureFocusDismissView();
@@ -1209,10 +1214,21 @@ public class FloatService extends Service {
 
     /** 读屏幕：获取无障碍服务捕获的当前屏幕文字 */
     private void readScreenContent() {
+        // 如果文本为空但服务在运行，尝试强制刷新
+        if (ShizukuAccessibilityService.lastScreenText.isEmpty()
+                && ShizukuAccessibilityService.isRunning) {
+            ShizukuAccessibilityService.requestScreenRefresh();
+            // 给无障碍服务一点时间捕获
+            try { Thread.sleep(300); } catch (InterruptedException ignored) {}
+        }
+
         String text = ShizukuAccessibilityService.lastScreenText;
         String app = ShizukuAccessibilityService.currentAppName;
         if (text.isEmpty()) {
-            aiAgent.submitToolResult("read_screen", "（无障碍服务未捕获到屏幕内容，可能未启用）", aiCallback);
+            String reason = ShizukuAccessibilityService.isRunning
+                ? "（无障碍服务已启动但暂未捕获到屏幕文字，请尝试切换一下页面）"
+                : "（无障碍服务未启用）";
+            aiAgent.submitToolResult("read_screen", reason, aiCallback);
             return;
         }
         String result = "当前应用: " + app + "\n屏幕内容: " + text;
@@ -1275,8 +1291,22 @@ public class FloatService extends Service {
             }
             aiOutput.append("━━━━━━━━━━━━━━━━\n");
             aiOutput.append(text);
+            constrainWindowHeight();
             // 不调 fullScroll，避免抢焦点
         });
+    }
+
+    /** 限制浮窗最大高度，对话过多时不会顶出屏幕 */
+    private void constrainWindowHeight() {
+        if (v == null || !v.isAttachedToWindow() || maxWindowHeight <= 0) return;
+        if (v.getHeight() > maxWindowHeight) {
+            p.height = maxWindowHeight;
+            try { wm.updateViewLayout(v, p); } catch (Exception ignored) {}
+            // 恢复 WRAP_CONTENT，下次内容少时能自动缩小
+        } else if (v.getHeight() <= maxWindowHeight && p.height != WindowManager.LayoutParams.WRAP_CONTENT) {
+            p.height = WindowManager.LayoutParams.WRAP_CONTENT;
+            try { wm.updateViewLayout(v, p); } catch (Exception ignored) {}
+        }
     }
 
     /** 显示Token设置对话框 */

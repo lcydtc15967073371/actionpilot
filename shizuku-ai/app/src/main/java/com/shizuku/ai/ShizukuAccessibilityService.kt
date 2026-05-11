@@ -28,9 +28,13 @@ class ShizukuAccessibilityService : AccessibilityService() {
         @JvmField
         var currentAppName: String = ""
 
-        /** 服务是否运行中 */
+        /** 服务是否运行中（@JvmField 允许 Java 直接访问） */
+        @JvmField
         var isRunning: Boolean = false
-            private set
+
+        /** 从 Java 获取运行状态 */
+        @JvmStatic
+        fun isServiceRunning(): Boolean = isRunning
 
         /** 最后点击的元素信息 */
         var lastClickLabel: String = ""
@@ -41,6 +45,16 @@ class ShizukuAccessibilityService : AccessibilityService() {
         /** UI 操作录制器（由 FloatService 设置） */
         @JvmField
         var uiMapRecorder: UiMapRecorder? = null
+
+        /** 当前服务实例（用于从 Java 调用实例方法） */
+        @JvmField
+        var serviceInstance: ShizukuAccessibilityService? = null
+
+        /** 从 Java 强制刷新屏幕捕获 */
+        @JvmStatic
+        fun requestScreenRefresh() {
+            serviceInstance?.captureScreen()
+        }
     }
 
     private var lastContentTime = 0L
@@ -49,6 +63,7 @@ class ShizukuAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         isRunning = true
+        serviceInstance = this
         val info = AccessibilityServiceInfo().apply {
             eventTypes = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or
                     AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED or
@@ -111,6 +126,7 @@ class ShizukuAccessibilityService : AccessibilityService() {
 
     override fun onDestroy() {
         isRunning = false
+        serviceInstance = null
         super.onDestroy()
     }
 
