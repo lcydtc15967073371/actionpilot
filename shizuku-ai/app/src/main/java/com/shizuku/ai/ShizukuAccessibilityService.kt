@@ -6,6 +6,7 @@ import android.graphics.Rect
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 
 /**
  * 无障碍服务 — 读屏幕、抓点击、感知页面变化
@@ -50,10 +51,17 @@ class ShizukuAccessibilityService : AccessibilityService() {
         @JvmField
         var serviceInstance: ShizukuAccessibilityService? = null
 
-        /** 从 Java 强制刷新屏幕捕获 */
+        /** 从 Java 强制刷新屏幕捕获（确保在主线程执行） */
         @JvmStatic
         fun requestScreenRefresh() {
-            serviceInstance?.captureScreen()
+            val instance = serviceInstance ?: return
+            if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
+                instance.captureScreen()
+            } else {
+                android.os.Handler(android.os.Looper.getMainLooper()).post {
+                    instance.captureScreen()
+                }
+            }
         }
     }
 
@@ -75,6 +83,12 @@ class ShizukuAccessibilityService : AccessibilityService() {
         }
         this.serviceInfo = info
         Log.d(TAG, "无障碍服务已连接")
+        // 连接后立即捕获当前屏幕，避免首次 read_screen 无数据
+        postDelayed(100) { captureScreen() }
+    }
+
+    private fun postDelayed(delayMs: Long, action: () -> Unit) {
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(action, delayMs)
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -137,26 +151,41 @@ class ShizukuAccessibilityService : AccessibilityService() {
 
     /** 捕获当前屏幕所有可见文本 */
     private fun captureScreen() {
-        val root = try {
-            rootInActiveWindow
-        } catch (_: Exception) {
-            null
-        } ?: return
+        val allTexts = linkedSetOf<String>()
 
-        try {
-            val texts = linkedSetOf<String>()
-            collectVisibleText(root, texts, 0)
-            val content = texts.joinToString(" | ").take(8000)
-            if (content.isNotBlank() && content != lastContentText) {
-                lastScreenText = content
-                lastContentText = content
-                lastContentTime = System.currentTimeMillis()
-                // 通知录制器屏幕内容变化
-                uiMapRecorder?.onScreenContent(content.take(500))
-                Log.d(TAG, "屏幕内容: ${content.take(200)}")
+        // 方法 1: getWindows() 遍历所有窗口（不受悬浮窗覆盖影响）
+        val windows = try { getWindows() } catch (_: Exception) { null }
+        if (windows != null) {
+            for (window in windows) {
+                try {
+                    val pkg = window.root?.packageName?.toString() ?: ""
+                    if (pkg == "com.shizuku.ai") continue // 跳过自己的浮窗
+                    if (window.type == AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY) continue
+                    val root = window.root ?: continue
+                    try { collectVisibleText(root, allTexts, 0) } finally { root.recycle() }
+                } catch (_: Exception) {
+                } finally {
+                    try { window.recycle() } catch (_: Exception) {}
+                }
             }
-        } finally {
-            root.recycle()
+        }
+
+        // 方法 2: rootInActiveWindow 兜底
+        if (allTexts.isEmpty()) {
+            try {
+                val root = rootInActiveWindow ?: return
+                try { collectVisibleText(root, allTexts, 0) } finally { root.recycle() }
+            } catch (_: Exception) { return }
+        }
+
+        if (allTexts.isEmpty()) return
+        val content = allTexts.joinToString(" | ").take(8000)
+        if (content != lastContentText) {
+            lastScreenText = content
+            lastContentText = content
+            lastContentTime = System.currentTimeMillis()
+            uiMapRecorder?.onScreenContent(content.take(500))
+            Log.d(TAG, "屏幕内容: ${content.take(200)}")
         }
     }
 
