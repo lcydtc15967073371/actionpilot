@@ -57,7 +57,23 @@ SSH 下 fallback 为写 `.compact_needed` 标记文件，配合 CLAUDE.md 提示
 
 ## 当前脚本
 
-见 `C:/Users/ql/inject_compact.py`（~160行，ctypes + Windows API，零依赖）。
+见 `C:/Users/ql/inject_compact.py`（~190行，ctypes + Windows API，零依赖）。
+
+### v2 关键修复：逐字符延迟注入
+
+原版在一次 `WriteConsoleInputW` 调用中写入全部字符记录（9字符 × KEY_DOWN+KEY_UP = 18条），Node.js REPL 来不及消费，导致丢字（如 `/compact` 变成 `/comac`）。
+
+修复后：每个字符单独写入（2条记录 → KEY_DOWN + KEY_UP），间隔 **80ms**，REPL 有充足时间处理每个字符。
+
+```python
+CHAR_DELAY_S = 0.08  # 逐字符注入延迟，防止 Node REPL 丢字
+for ch in text:
+    rec_down = INPUT_RECORD(KEY_EVENT, KEY_EVENT_RECORD(...))
+    rec_up = INPUT_RECORD(KEY_EVENT, KEY_EVENT_RECORD(...))
+    arr = (INPUT_RECORD * 2)(rec_down, rec_up)
+    kernel32.WriteConsoleInputW(h_conin, arr, 2, ...)
+    time.sleep(CHAR_DELAY_S)
+```
 
 ## 健壮性
 
@@ -76,3 +92,4 @@ SSH 下 fallback 为写 `.compact_needed` 标记文件，配合 CLAUDE.md 提示
 | 2026-05-10 | 修复跨会话失效 bug（新会话永不触发的逻辑错误） |
 | 2026-05-10 | 添加 AttachConsole 方案（原 CONIN$ 在 hook 子进程中无效） |
 | 2026-05-10 | 添加 SSH 限制说明 + fallback 标记文件 |
+| 2026-05-11 | 逐字符延迟注入，80ms 间隔修复 REPL 丢字问题 |
