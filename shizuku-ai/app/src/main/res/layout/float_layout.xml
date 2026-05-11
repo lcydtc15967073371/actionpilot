@@ -37,6 +37,22 @@
             android:minHeight="0dp"
             android:layout_marginEnd="4dp" />
 
+        <!-- 缩小到悬浮球按钮 -->
+        <Button
+            android:id="@+id/btn_minimize_ball"
+            android:layout_width="22dp"
+            android:layout_height="22dp"
+            android:text="⚪"
+            android:textSize="10sp"
+            android:textColor="#FFFFFF"
+            android:backgroundTint="#444444"
+            android:paddingHorizontal="0dp"
+            android:paddingVertical="0dp"
+            android:minWidth="0dp"
+            android:minHeight="0dp"
+            android:layout_marginEnd="2dp"
+            android:contentDescription="缩小到球" />
+
         <!-- 关闭按钮 -->
         <ImageButton
             android:id="@+id/btn_close"

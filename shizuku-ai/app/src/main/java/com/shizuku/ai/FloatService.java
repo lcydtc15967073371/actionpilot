@@ -7,6 +7,8 @@ import android.content.Intent;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.content.SharedPreferences;
+import android.annotation.SuppressLint;
+import android.graphics.Color;
 import android.graphics.PixelFormat;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
@@ -70,6 +72,13 @@ public class FloatService extends Service {
     private ShizukuShellExecutor shellExecutor;
     private AIAgent aiAgent;
     private AIAgent.AICallback aiCallback;
+
+    // 悬浮球相关
+    private View ballView;
+    private boolean isBallMode = true;
+    private float ballSx, ballSy, ballIx, ballIy;
+    private boolean ballDragging = false;
+    private static final int BALL_SIZE_DP = 72;
 
     // 浏览器相关
     private View browserView;
@@ -152,6 +161,7 @@ public class FloatService extends Service {
         v.findViewById(R.id.btn_ai_send).setOnClickListener(vv -> sendToAI());
         v.findViewById(R.id.btn_ai_clear).setOnClickListener(vv -> clearAIChat());
         btnTokenSetup.setOnClickListener(vv -> showTokenDialog());
+        v.findViewById(R.id.btn_minimize_ball).setOnClickListener(vv -> minimizeToBall());
     v.findViewById(R.id.btn_close).setOnClickListener(vv -> {
         // 彻底关闭：清空焦点 + 清空AI对话 + 停掉所有线程 + 销毁悬浮窗
         cancelFocusBeforeExit();
@@ -217,12 +227,114 @@ public class FloatService extends Service {
 
         wm.addView(v, p);
 
+        // 先显示悬浮球模式（隐藏大窗口）
+        isBallMode = true;
+        v.setVisibility(View.GONE);
+        showBallOverlay();
+
         // 欢迎信息
         if (tokenManager.hasToken()) {
             appendAIOutput("🤖 说需求，我来搞定！");
         } else {
             appendAIOutput("🔑 点右上角🔑设置Token");
         }
+    }
+
+    /** 创建悬浮球覆盖层（SiriBall） */
+    @SuppressLint("ClickableViewAccessibility")
+    private void showBallOverlay() {
+        if (ballView != null) return;
+
+        // 球容器
+        LinearLayout container = new LinearLayout(this);
+        container.setGravity(android.view.Gravity.CENTER);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setShape(GradientDrawable.OVAL);
+        bg.setColor(Color.TRANSPARENT);
+        container.setBackground(bg);
+
+        SiriBallView siriBall = new SiriBallView(this);
+        int density = (int) getResources().getDisplayMetrics().density;
+        int ballSize = BALL_SIZE_DP * density;
+        container.addView(siriBall, ballSize, ballSize);
+
+        // 拖拽 + 点击处理
+        container.setOnTouchListener((vv, event) -> {
+            switch (event.getAction()) {
+                case MotionEvent.ACTION_DOWN:
+                    ballDragging = false;
+                    ballSx = event.getRawX();
+                    ballSy = event.getRawY();
+                    ballIx = ballParams.x;
+                    ballIy = ballParams.y;
+                    return true;
+                case MotionEvent.ACTION_MOVE:
+                    float dx = event.getRawX() - ballSx;
+                    float dy = event.getRawY() - ballSy;
+                    if (Math.abs(dx) > 10 || Math.abs(dy) > 10) {
+                        ballDragging = true;
+                    }
+                    ballParams.x = (int) (ballIx + dx);
+                    ballParams.y = Math.max(-200, (int) (ballIy + dy));
+                    try { wm.updateViewLayout(ballView, ballParams); } catch (Exception ignored) {}
+                    return true;
+                case MotionEvent.ACTION_UP:
+                    if (!ballDragging) {
+                        // 点击：展开为完整浮窗
+                        hideBallOverlay();
+                        showFloatWindow();
+                    }
+                    return ballDragging;
+            }
+            return false;
+        });
+
+        ballView = container;
+
+        // 窗口参数
+        int sw = getResources().getDisplayMetrics().widthPixels;
+        int ballPx = BALL_SIZE_DP * density;
+        ballParams = new WindowManager.LayoutParams();
+        ballParams.type = Build.VERSION.SDK_INT >= 26 ?
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY :
+                WindowManager.LayoutParams.TYPE_PHONE;
+        ballParams.flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS;
+        ballParams.format = PixelFormat.TRANSLUCENT;
+        ballParams.gravity = Gravity.TOP | Gravity.START;
+        ballParams.width = ballPx;
+        ballParams.height = ballPx;
+        ballParams.x = sw / 2 - ballPx / 2;
+        ballParams.y = getResources().getDisplayMetrics().heightPixels / 2 - ballPx / 2;
+
+        try {
+            wm.addView(ballView, ballParams);
+        } catch (Exception e) {
+            ballView = null;
+        }
+    }
+
+    private WindowManager.LayoutParams ballParams;
+
+    private void hideBallOverlay() {
+        if (ballView != null) {
+            try { wm.removeView(ballView); } catch (Exception ignored) {}
+            ballView = null;
+        }
+    }
+
+    private void showFloatWindow() {
+        if (v != null) {
+            v.setVisibility(View.VISIBLE);
+        }
+    }
+
+    private void minimizeToBall() {
+        if (v != null) {
+            v.setVisibility(View.GONE);
+        }
+        hideKeyboard();
+        showBallOverlay();
     }
 
     /** 复制文本到剪贴板 */
@@ -1094,6 +1206,7 @@ public class FloatService extends Service {
     @Override
     public void onDestroy() {
         cancelFocusBeforeExit();
+        hideBallOverlay();
         if (focusDismissView != null && wm != null) {
             try { wm.removeView(focusDismissView); } catch (Exception ignored) {}
             focusDismissView = null;
