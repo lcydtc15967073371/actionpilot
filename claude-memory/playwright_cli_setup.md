@@ -65,6 +65,42 @@ p close-all
 p kill-all
 ```
 
+## 实操成功命令流（MiMo 表单填写）
+
+```bash
+# 1. 打开页面
+cd ~ && playwright-cli open https://100t.xiaomimimo.com --headed
+
+# 2. 获取快照看元素
+cd ~ && playwright-cli snapshot
+
+# 3. 点击元素（用 ref）
+cd ~ && playwright-cli click e42     # 点击「立即申请」
+cd ~ && playwright-cli click e181    # 选择 Claude Code
+cd ~ && playwright-cli click e204    # 选择 Claude 系列
+
+# 4. 填写文本
+cd ~ && playwright-cli fill e175 "邮箱地址"
+cd ~ && playwright-cli fill e224 "项目描述..."
+cd ~ && playwright-cli fill e239 "https://github.com/链接"
+
+# 5. 截图
+cd ~ && playwright-cli screenshot
+
+# 6. 提交（若有验证码则需人工）
+cd ~ && playwright-cli click e241    # 点提交（前提: 验证码已过）
+
+# 7. 关闭
+cd ~ && playwright-cli close
+```
+
+关键心得：
+- **必须先 `cd ~`**（配置文件在 home 目录），`--config` 参数不一定所有子命令都认
+- `snapshot` 拿到 ref 后操作非常快，不用写选择器
+- 滑块验证码过不了，碰到需要人工拖
+- `close / close-all / kill-all` 三个不同力度关浏览器
+- `--headed` 能看到浏览器窗口，调试用
+
 ## 注意点
 
 - `--config` 选项只能在某些子命令前使用，`snapshot` 等不支持。需要在配置文件所在目录执行，或使用 alias
