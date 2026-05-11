@@ -8,6 +8,7 @@ import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.content.SharedPreferences;
 import android.annotation.SuppressLint;
+import android.util.Log;
 import android.graphics.Color;
 import android.graphics.PixelFormat;
 import android.graphics.drawable.GradientDrawable;
@@ -52,7 +53,7 @@ import java.util.List;
 
 public class FloatService extends Service {
 
-    private WindowManager wm;
+    private static final String TAG = "ShizukuAI";    private WindowManager wm;
     private View v;
     private WindowManager.LayoutParams p;
     private float sx, sy, ix, iy;
@@ -1212,28 +1213,112 @@ public class FloatService extends Service {
         }
     }
 
-    /** 读屏幕：获取无障碍服务捕获的当前屏幕文字 */
+    /** 读屏幕：获取无障碍服务捕获的当前屏幕文字 + 节点结构信息 */
     private void readScreenContent() {
-        // 如果文本为空但服务在运行，尝试强制刷新
-        if (ShizukuAccessibilityService.lastScreenText.isEmpty()
-                && ShizukuAccessibilityService.isRunning) {
-            ShizukuAccessibilityService.requestScreenRefresh();
-            // 给无障碍服务一点时间捕获
-            try { Thread.sleep(300); } catch (InterruptedException ignored) {}
-        }
+        try {
+            // 触发深度捕获
+            if (ShizukuAccessibilityService.isRunning) {
+                ShizukuAccessibilityService.requestDetailedScreenCapture();
+                try { Thread.sleep(300); } catch (InterruptedException ignored) {}
+            }
 
-        String text = ShizukuAccessibilityService.lastScreenText;
-        String app = ShizukuAccessibilityService.currentAppName;
-        if (text.isEmpty()) {
-            String reason = ShizukuAccessibilityService.isRunning
-                ? "（无障碍服务已启动但暂未捕获到屏幕文字，请尝试切换一下页面）"
-                : "（无障碍服务未启用）";
-            aiAgent.submitToolResult("read_screen", reason, aiCallback);
-            return;
+            String app = ShizukuAccessibilityService.currentAppName;
+            String pkg = ShizukuAccessibilityService.currentPackage;
+            String screenText = ShizukuAccessibilityService.lastScreenText;
+            String structure = ShizukuAccessibilityService.lastScreenStructure;
+
+            StringBuilder result = new StringBuilder();
+            if (app != null && !app.isEmpty()) {
+                result.append("当前应用: ").append(app);
+                if (pkg != null && !pkg.isEmpty()) result.append(" (").append(pkg).append(")");
+            }
+
+            if (screenText != null && !screenText.isEmpty()) {
+                result.append("\n\n屏幕文字:\n").append(screenText);
+            }
+
+            if (structure != null && !structure.isEmpty()) {
+                result.append("\n\n可见控件:\n").append(structure);
+            }
+
+            // 桌面启动器：无障碍节点不可读，走 Shizuku 获取应用列表
+            boolean hasContent = (screenText != null && !screenText.isEmpty())
+                || (structure != null && !structure.isEmpty());
+            if (!hasContent) {
+                boolean isLauncher = pkg != null && isLauncherPackage(pkg);
+                if (isLauncher) {
+                    result.append("\n（桌面启动器图标不可读，已自动获取应用列表）");
+                    // 直接从 Shizuku 拉应用列表，不依赖无障碍
+                    result.append("\n\n已安装应用:\n").append(fetchAppListFromShell());
+                    result.append("\n\n提示：可以用 start_app 打开应用。");
+                } else {
+                    result.append("\n\n屏幕不含文字或交互控件。");
+                }
+            }
+
+            String resultStr = result.toString();
+            appendAIOutput("📱 " + (app != null ? app : "未知"));
+            aiAgent.submitToolResult("read_screen", resultStr, aiCallback);
+        } catch (Exception e) {
+            Log.e(TAG, "readScreenContent 异常: " + e.getMessage());
+            appendAIOutput("📱 读取失败");
+            aiAgent.submitToolResult("read_screen", "[错误] " + e.getMessage(), aiCallback);
         }
-        String result = "当前应用: " + app + "\n屏幕内容: " + text;
-        appendAIOutput("📱 " + result.substring(0, Math.min(result.length(), 300)));
-        aiAgent.submitToolResult("read_screen", result, aiCallback);
+    }
+
+    /** 直接从 Shell 获取应用列表（桌面兜底用） */
+    private String fetchAppListFromShell() {
+        StringBuilder sb = new StringBuilder();
+        try {
+            ShellResult sr = ShizukuShell.exec("pm list packages -3");
+            if (sr.output != null && !sr.output.isEmpty()) {
+                String[] lines = sr.output.split("\n");
+                int count = 0;
+                for (String line : lines) {
+                    String pkgName = line.trim().replace("package:", "");
+                    if (!pkgName.isEmpty()) {
+                        String appName = resolveAppName(pkgName);
+                        sb.append("  • ").append(appName).append(" (").append(pkgName).append(")\n");
+                        if (++count >= 30) {
+                            int remaining = lines.length - count;
+                            if (remaining > 0) sb.append("  ... 还有 ").append(remaining).append(" 个应用");
+                            break;
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "fetchAppListFromShell 失败: " + e.getMessage());
+        }
+        // 如果第三方列表失败，回退试试更宽的查询
+        if (sb.length() == 0) {
+            try {
+                ShellResult sr = ShizukuShell.exec("pm list packages");
+                if (sr.output != null && !sr.output.isEmpty()) {
+                    String[] lines = sr.output.split("\n");
+                    int count = 0;
+                    for (String line : lines) {
+                        String pkgName = line.trim().replace("package:", "");
+                        if (!pkgName.isEmpty() && !pkgName.equals("android")) {
+                            sb.append("  • ").append(pkgName).append("\n");
+                            if (++count >= 30) { sb.append("  ...\n"); break; }
+                        }
+                    }
+                }
+            } catch (Exception ignored) {}
+        }
+        return sb.length() > 0 ? sb.toString() : "（无法获取应用列表）";
+    }
+
+    /** 判断是否为桌面启动器（节点树不可读的已知包名） */
+    private boolean isLauncherPackage(String pkg) {
+        if (pkg == null) return false;
+        return pkg.equals("com.bbk.launcher2")          // vivo Funtouch OS
+            || pkg.equals("com.android.launcher3")      // AOSP
+            || pkg.equals("com.google.android.apps.nexuslauncher") // Pixel
+            || pkg.equals("com.sec.android.app.launcher") // Samsung
+            || pkg.equals("com.miui.home")              // Xiaomi
+            || pkg.equals("com.oneplus.launcher");      // OnePlus
     }
 
     /** 通过 Shizuku 自动启用无障碍服务 */

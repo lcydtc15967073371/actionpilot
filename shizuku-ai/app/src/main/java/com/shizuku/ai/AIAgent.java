@@ -45,7 +45,7 @@ public class AIAgent {
         "1. search_web | 联网搜索 | params: {\"query\": \"搜索关键词\"}\n" +
         "2. browse_url | 在浏览器打开网页 | params: {\"url\": \"https://...\"}\n" +
         "3. read_page | 读取当前浏览器页面的文字内容 | params: {}\n" +
-        "4. read_screen | 读取手机当前屏幕上的文字（无障碍） | params: {}\n" +
+        "4. read_screen | 读取手机当前屏幕 UI 布局（无障碍）。返回当前应用+屏幕文字+控件列表（控件类型、标签、坐标bounds、可点击标记）。AI 可用坐标配合 input tap 点击（如 Button \"搜索\" [100,200,300,400] clickable → input tap 250 300）。无参数 | params: {}\n" +
         "5. start_app | 打开应用 | params: {\"package\": \"com.example.app\"}\n" +
         "6. list_apps | 列出已安装应用 | params: {\"keyword\": \"可选搜索词\"}\n" +
         "7. toggle_flashlight | 切换手电筒开关 | params: {}\n" +
@@ -205,23 +205,23 @@ public class AIAgent {
         String jsonPart = trimmed;
 
         // 扫描全文找 {"tool": 开头的 JSON（AI 可能先说一句话再输出 JSON）
+        // 注意：AI 可能输出格式化 JSON（带换行），不能只搜 {"tool"
         int toolJsonStart = trimmed.indexOf("{\"tool\"");
-        final String textBeforeJson;
-        if (toolJsonStart > 0) {
-            textBeforeJson = trimmed.substring(0, toolJsonStart).trim();
-            jsonPart = trimmed.substring(toolJsonStart).trim();
-        } else {
-            textBeforeJson = "";
+        if (toolJsonStart < 0) {
+            // 匹配格式化 JSON: { \n "tool": ... 等
+            java.util.regex.Matcher m = java.util.regex.Pattern.compile(
+                "\\{\\s*\"tool\"").matcher(trimmed);
+            if (m.find()) toolJsonStart = m.start();
         }
 
-        // 尝试解析找到的 JSON 部分
-        if (jsonPart.startsWith("{\"tool\"")) {
+        if (toolJsonStart >= 0) {
+            String textBefore = toolJsonStart > 0 ? trimmed.substring(0, toolJsonStart).trim() : "";
+            jsonPart = trimmed.substring(toolJsonStart).trim();
             try {
                 JSONObject toolCall = new JSONObject(jsonPart);
                 if (toolCall.has("tool")) {
-                    // 先显示 AI 的文字部分
-                    if (!textBeforeJson.isEmpty()) {
-                        mainHandler.post(() -> callback.onResponse(textBeforeJson));
+                    if (!textBefore.isEmpty()) {
+                        mainHandler.post(() -> callback.onResponse(textBefore));
                     }
                     String toolName = toolCall.getString("tool");
                     String params = toolCall.has("params") ? toolCall.getJSONObject("params").toString() : "{}";

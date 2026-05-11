@@ -21,6 +21,10 @@ class ShizukuAccessibilityService : AccessibilityService() {
         @JvmField
         var lastScreenText: String = ""
 
+        /** 详细屏幕结构信息（无文本时备用） */
+        @JvmField
+        var lastScreenStructure: String = ""
+
         /** 当前前台 App 包名 */
         @JvmField
         var currentPackage: String = ""
@@ -63,6 +67,19 @@ class ShizukuAccessibilityService : AccessibilityService() {
                 }
             }
         }
+
+        /** 从 Java 触发的深度屏幕捕获——带结构信息（无文本时自动补充） */
+        @JvmStatic
+        fun requestDetailedScreenCapture() {
+            val instance = serviceInstance ?: return
+            if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
+                instance.captureDetailedScreen()
+            } else {
+                android.os.Handler(android.os.Looper.getMainLooper()).post {
+                    instance.captureDetailedScreen()
+                }
+            }
+        }
     }
 
     private var lastContentTime = 0L
@@ -101,16 +118,18 @@ class ShizukuAccessibilityService : AccessibilityService() {
                     currentAppName = resolveAppName(pkg)
                     lastContentTime = 0
                     lastContentText = ""
+                    Log.d(TAG, "事件 WINDOW_STATE_CHANGED → $currentAppName/$pkg cls=${event.className}")
                     captureScreen()
                     // 通知录制器
                     val screen = event.className?.toString()
                         ?.substringAfterLast('.')?.substringBefore('$') ?: "unknown"
                     uiMapRecorder?.onWindowChanged(pkg, currentAppName, screen)
-                    Log.d(TAG, "窗口切换: $currentAppName/$pkg")
                 }
 
                 AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> {
                     if (System.currentTimeMillis() - lastContentTime < 1500) return
+                    val pkg = event.packageName?.toString() ?: "?"
+                    Log.d(TAG, "事件 WINDOW_CONTENT_CHANGED pkg=$pkg")
                     captureScreen()
                 }
 
@@ -122,7 +141,7 @@ class ShizukuAccessibilityService : AccessibilityService() {
                         val viewId = event.source?.viewIdResourceName ?: ""
                         uiMapRecorder?.onAction("CLICK", label,
                             if (bounds.isNotBlank()) "$bounds | $viewId" else viewId)
-                        Log.d(TAG, "点击: '$label' $bounds")
+                        Log.d(TAG, "事件 CLICK: '$label' $bounds")
                     }
                     if (System.currentTimeMillis() - lastContentTime >= 1000) {
                         captureScreen()
@@ -131,6 +150,210 @@ class ShizukuAccessibilityService : AccessibilityService() {
             }
         } catch (e: Exception) {
             Log.e(TAG, "事件处理错误: ${e.message}")
+        }
+    }
+
+    /** 捕获当前屏幕所有可见文字（事件驱动，轻量快速） */
+    private fun captureScreen() {
+        val allTexts = linkedSetOf<String>()
+
+        // 主方法: rootInActiveWindow（跟 ActionPilot 一致，最可靠）
+        val root = try { rootInActiveWindow } catch (_: Exception) { null }
+        Log.d(TAG, "captureScreen: rootInActiveWindow=${root != null} pkg=$currentPackage")
+        if (root != null) {
+            try {
+                val r = Rect(); root.getBoundsInScreen(r)
+                Log.d(TAG, "  root: class=${root.className} childCount=${root.childCount} bounds=[${r.left},${r.top},${r.right},${r.bottom}]")
+                val before = allTexts.size
+                collectVisibleText(root, allTexts, 0)
+                Log.d(TAG, "  collectVisibleText: found ${allTexts.size - before} texts")
+            } finally { root.recycle() }
+        } else {
+            Log.w(TAG, "  rootInActiveWindow = null (vivo launcher 特征)")
+        }
+
+        // 兜底: getWindows() 遍历所有窗口
+        if (allTexts.isEmpty()) {
+            val windows = try { getWindows() } catch (_: Exception) { null }
+            if (windows != null) {
+                Log.d(TAG, "captureScreen: getWindows() returns ${windows.size} windows:")
+                var wi = 0
+                for (w in windows) {
+                    try {
+                        val r = w.root; val t = w.type; val p = r?.packageName
+                        val rect = Rect(); w.getBoundsInScreen(rect)
+                        Log.d(TAG, "  win[$wi]: type=$t root=${r != null} pkg=$p bounds=[${rect.left},${rect.top},${rect.right},${rect.bottom}]")
+                        if (r != null && p?.toString() != "com.shizuku.ai" && t != AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY) {
+                            try {
+                                val before = allTexts.size
+                                collectVisibleText(r, allTexts, 0)
+                                if (allTexts.size > before)
+                                    Log.d(TAG, "    collected ${allTexts.size - before} texts from win[$wi]")
+                            } finally { r.recycle() }
+                        }
+                    } catch (_: Exception) {
+                    } finally {
+                        try { w.recycle() } catch (_: Exception) {}
+                    }
+                    wi++
+                }
+            } else {
+                Log.w(TAG, "captureScreen: getWindows() returned null")
+            }
+        }
+
+        if (allTexts.isEmpty()) {
+            Log.d(TAG, "captureScreen: 全链路无文字，清除 lastScreenText")
+            lastScreenText = ""
+            return
+        }
+        val content = allTexts.joinToString(" | ").take(8000)
+        if (content != lastContentText) {
+            lastScreenText = content
+            lastContentText = content
+            lastContentTime = System.currentTimeMillis()
+            uiMapRecorder?.onScreenContent(content.take(500))
+            Log.d(TAG, "captureScreen: 更新屏幕内容 (${content.length} chars): ${content.take(200)}")
+        } else {
+            Log.d(TAG, "captureScreen: 内容未变，跳过")
+        }
+    }
+
+    /**
+     * 深度捕获：无论是否有文字，都收集控件结构信息（class name + bounds + clickable），
+     * 让 AI 能读屏幕文字的同时也知道控件位置和可点击性。
+     * 包含 getWindows() 兜底，解决 vivo 桌面 rootInActiveWindow 返回 null 的问题。
+     */
+    private fun captureDetailedScreen() {
+        // 先刷新普通文字捕获
+        captureScreen()
+        lastScreenStructure = ""
+
+        // 尝试1: rootInActiveWindow
+        Log.d(TAG, "captureDetailedScreen: 尝试1 rootInActiveWindow")
+        var collected = collectWindowsStructure { rootInActiveWindow }
+        if (collected != null) {
+            Log.d(TAG, "captureDetailedScreen: 尝试1 成功，${collected.size} 个元素")
+            saveStructure(collected)
+            return
+        }
+        Log.w(TAG, "captureDetailedScreen: 尝试1 失败")
+
+        // 尝试2: getWindows() 遍历（解决 vivo 桌面 rootInActiveWindow = null 的问题）
+        Log.d(TAG, "captureDetailedScreen: 尝试2 getWindows()")
+        val windows = try { getWindows() } catch (_: Exception) { null }
+        if (windows != null) {
+            Log.d(TAG, "  getWindows() = ${windows.size} windows")
+            val allElements = mutableListOf<String>()
+            var wi = 0
+            for (window in windows) {
+                try {
+                    val winRoot = window.root
+                    if (winRoot == null) {
+                        Log.d(TAG, "  win[$wi]: root=null type=${window.type}")
+                        wi++; continue
+                    }
+                    try {
+                        val pkg = winRoot.packageName?.toString() ?: ""
+                        if (pkg == "com.shizuku.ai") { wi++; continue }
+                        if (window.type == AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY) { wi++; continue }
+                        val before = allElements.size
+                        collectNodeStructure(winRoot, allElements, 0)
+                        Log.d(TAG, "  win[$wi]: type=${window.type} pkg=$pkg nodes=${allElements.size - before}")
+                    } finally { winRoot.recycle() }
+                } catch (_: Exception) {
+                } finally {
+                    try { window.recycle() } catch (_: Exception) {}
+                }
+                wi++
+            }
+            if (allElements.isNotEmpty()) {
+                Log.d(TAG, "captureDetailedScreen: 尝试2 成功，${allElements.size} 个元素")
+                saveStructure(allElements)
+                return
+            }
+            Log.w(TAG, "captureDetailedScreen: 尝试2 无有效元素")
+        } else {
+            Log.w(TAG, "captureDetailedScreen: getWindows() = null")
+        }
+
+        // 尝试3: 扫描 root 根节点自身
+        Log.d(TAG, "captureDetailedScreen: 尝试3 root自身")
+        val fallbackRoot = try { rootInActiveWindow } catch (_: Exception) { null }
+        if (fallbackRoot != null) {
+            try {
+                val cls = fallbackRoot.className?.toString()?.substringAfterLast('.') ?: "?"
+                val pkg = fallbackRoot.packageName?.toString() ?: ""
+                val rect = Rect()
+                fallbackRoot.getBoundsInScreen(rect)
+                Log.d(TAG, "  fallbackRoot: class=$cls pkg=$pkg bounds=[${rect.left},${rect.top},${rect.right},${rect.bottom}]")
+                if (pkg.isNotEmpty()) {
+                    lastScreenStructure = "${cls} | ${pkg} ${if (!rect.isEmpty) "[${rect.left},${rect.top},${rect.right},${rect.bottom}]" else ""}"
+                }
+            } finally { fallbackRoot.recycle() }
+        } else {
+            Log.w(TAG, "captureDetailedScreen: rootInActiveWindow 一直为 null")
+        }
+
+        Log.w(TAG, "捕获完成: lastScreenText='${lastScreenText.take(100)}' lastScreenStructure='${lastScreenStructure.take(100)}'")
+    }
+
+    /** 从指定根节点收集结构信息，返回列表或 null */
+    private fun collectWindowsStructure(rootProvider: () -> AccessibilityNodeInfo?): MutableList<String>? {
+        val root = try { rootProvider() } catch (_: Exception) { null } ?: return null
+        try {
+            val elements = mutableListOf<String>()
+            collectNodeStructure(root, elements, 0)
+            return if (elements.isNotEmpty()) elements else null
+        } finally {
+            root.recycle()
+        }
+    }
+
+    private fun saveStructure(elements: MutableList<String>) {
+        val detail = elements.take(100).joinToString("\n")
+        lastScreenStructure = detail
+        Log.d(TAG, "屏幕结构: ${elements.size} 个元素")
+    }
+
+    /**
+     * 收集节点层级结构信息：class name + text/label + bounds + clickable
+     */
+    private fun collectNodeStructure(node: AccessibilityNodeInfo, elements: MutableList<String>, depth: Int) {
+        if (depth > 30) return
+        if (!node.isVisibleToUser) return
+
+        val isClickable = node.isClickable
+        val hasText = !node.text.isNullOrBlank() || !node.contentDescription.isNullOrBlank()
+
+        // 收集中间关键节点（clickable 或有文字）和叶子节点
+        if (isClickable || hasText || depth == 0 || node.childCount == 0) {
+            val cls = node.className?.toString()?.substringAfterLast('.') ?: "?"
+            val text = node.text?.toString()?.trim()?.take(60) ?: ""
+            val cd = node.contentDescription?.toString()?.trim()?.take(60) ?: ""
+            val label = when {
+                text.isNotBlank() && cd.isNotBlank() && text != cd -> "$text / $cd"
+                text.isNotBlank() -> text
+                cd.isNotBlank() -> cd
+                else -> ""
+            }
+
+            val rect = Rect()
+            node.getBoundsInScreen(rect)
+            val bounds = if (rect.isEmpty) "" else "[${rect.left},${rect.top},${rect.right},${rect.bottom}]"
+
+            val parts = mutableListOf(cls)
+            if (label.isNotBlank()) parts.add("\"$label\"")
+            if (bounds.isNotBlank()) parts.add(bounds)
+            if (isClickable) parts.add("clickable")
+
+            elements.add("  ".repeat(depth.coerceAtMost(3)) + parts.joinToString(" "))
+        }
+
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            collectNodeStructure(child, elements, depth + 1)
+            child.recycle()
         }
     }
 
@@ -147,46 +370,6 @@ class ShizukuAccessibilityService : AccessibilityService() {
     /** 强制刷新屏幕内容 */
     fun refreshScreen() {
         captureScreen()
-    }
-
-    /** 捕获当前屏幕所有可见文本 */
-    private fun captureScreen() {
-        val allTexts = linkedSetOf<String>()
-
-        // 方法 1: getWindows() 遍历所有窗口（不受悬浮窗覆盖影响）
-        val windows = try { getWindows() } catch (_: Exception) { null }
-        if (windows != null) {
-            for (window in windows) {
-                try {
-                    val pkg = window.root?.packageName?.toString() ?: ""
-                    if (pkg == "com.shizuku.ai") continue // 跳过自己的浮窗
-                    if (window.type == AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY) continue
-                    val root = window.root ?: continue
-                    try { collectVisibleText(root, allTexts, 0) } finally { root.recycle() }
-                } catch (_: Exception) {
-                } finally {
-                    try { window.recycle() } catch (_: Exception) {}
-                }
-            }
-        }
-
-        // 方法 2: rootInActiveWindow 兜底
-        if (allTexts.isEmpty()) {
-            try {
-                val root = rootInActiveWindow ?: return
-                try { collectVisibleText(root, allTexts, 0) } finally { root.recycle() }
-            } catch (_: Exception) { return }
-        }
-
-        if (allTexts.isEmpty()) return
-        val content = allTexts.joinToString(" | ").take(8000)
-        if (content != lastContentText) {
-            lastScreenText = content
-            lastContentText = content
-            lastContentTime = System.currentTimeMillis()
-            uiMapRecorder?.onScreenContent(content.take(500))
-            Log.d(TAG, "屏幕内容: ${content.take(200)}")
-        }
     }
 
     private fun collectVisibleText(node: AccessibilityNodeInfo, texts: MutableSet<String>, depth: Int) {
