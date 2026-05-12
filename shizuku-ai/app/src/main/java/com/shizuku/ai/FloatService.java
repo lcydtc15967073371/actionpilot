@@ -92,10 +92,6 @@ public class FloatService extends Service {
     // 窗口高度限制
     private int maxWindowHeight;
 
-    // 计划执行门：AI 必须先 plan_operation 才能 click_screen
-    private boolean planRequired = false;
-    private String pendingPlanGoal = "";
-
     // UI 操作录制
     private UiMapRecorder uiMapRecorder;
     private boolean isRecording = false;
@@ -104,6 +100,9 @@ public class FloatService extends Service {
     private Runnable dumpsysPoller;
     private boolean dumpsysPolling = false;
     private String lastDumpsysFocus = "";
+
+    // API 服务器（ADB 远程调试，端口 8765）
+    private ApiServer apiServer;
 
     @Override
     public void onCreate() {
@@ -118,6 +117,10 @@ public class FloatService extends Service {
 
         // 初始化adb命令库（传入Context以便持久化AI学习的新命令）
         AdbCommands.init(this);
+
+        // 启动 API 服务器（adb forward tcp:8765 tcp:8765）
+        apiServer = new ApiServer(this::handleApiRequest);
+        apiServer.start();
 
         create();
     }
@@ -781,10 +784,7 @@ public class FloatService extends Service {
                     createNote(params.optString("content", ""), params.optString("title", ""));
                     break;
                 case "read_uimap":
-                    readUiMap();
-                    break;
-                case "plan_operation":
-                    planOperation(params.optString("goal", ""), params.optString("app", ""));
+                    readUiMap(params);
                     break;
                 case "learn":
                     learnExperience(params.optString("key", ""), params.optString("value", ""));
@@ -821,42 +821,14 @@ public class FloatService extends Service {
         }).start();
     }
 
-    /** 点击屏幕坐标：浮窗自动缩小为球避免挡住点击区域，点击后恢复 */
+    /** 点击屏幕坐标：浮窗自动缩小为球避免挡住点击区域，点击后触发回想 */
     private void clickScreen(JSONObject params) {
         String action = params.optString("action", "tap");
         int x = params.optInt("x", 0);
         int y = params.optInt("y", 0);
         String actionLabel = action.equals("back") ? "返回" : "点击 (" + x + ", " + y + ")";
 
-        // ===== 计划执行门：必须先规划才能点击（返回键不需要规划） =====
-        if (planRequired && !action.equals("back")) {
-            appendAIOutput("⚠️ 需先规划再点击");
-            new Thread(() -> {
-                String screenText = ShizukuAccessibilityService.lastScreenText;
-                String structure = ShizukuAccessibilityService.lastScreenStructure;
-                String uimapData = "";
-                if (uiMapRecorder != null && uiMapRecorder.getTotalActions() > 0) {
-                    uimapData = uiMapRecorder.exportForAI();
-                }
-                StringBuilder ctx = new StringBuilder();
-                ctx.append("⚠️ 必须先调用 plan_operation 做规划才能点击！\n\n");
-                ctx.append("用户目标: ").append(pendingPlanGoal).append("\n\n");
-                ctx.append("当前应用: ").append(ShizukuAccessibilityService.currentAppName).append("\n");
-                if (screenText != null && !screenText.isEmpty()) {
-                    ctx.append("屏幕文字: ").append(screenText).append("\n");
-                }
-                if (structure != null && !structure.isEmpty()) {
-                    ctx.append("可见控件:\n").append(structure).append("\n");
-                }
-                if (!uimapData.isEmpty()) {
-                    ctx.append("\n操作地图:\n").append(uimapData).append("\n");
-                }
-                ctx.append("\n请分析当前屏幕，规划点击步骤后再执行。");
-                aiAgent.submitToolResult("plan_enforcement", ctx.toString(), aiCallback);
-            }).start();
-            return;
-        }
-
+        Log.d(TAG, "=== CLICK_SCREEN === action=" + action + " x=" + x + " y=" + y + " 浮窗显示=" + (v != null && v.getVisibility() == View.VISIBLE && !isBallMode));
         appendAIOutput("👆 " + actionLabel);
 
         // 构建命令
@@ -884,11 +856,14 @@ public class FloatService extends Service {
         }
     }
 
+    /** 执行点击 + 恢复浮窗 */
     private void doClickTap(String command, boolean needRestore) {
+        Log.d(TAG, "=== CLICK === " + command);
         new Thread(() -> {
             try {
                 ShellResult sr = ShizukuShell.exec(command);
                 String output = sr.output.length() > 0 ? sr.output : "(无输出)";
+                Log.d(TAG, "点击结果: exit=" + sr.exitCode + " output=" + output.substring(0, Math.min(100, output.length())));
                 aiAgent.submitToolResult("click_screen", "已执行: " + command + "\n退出码:" + sr.exitCode + "\n" + output, aiCallback);
             } catch (Exception e) {
                 aiAgent.submitToolResult("click_screen", "[错误] 执行 " + command + " 失败: " + e.getMessage(), aiCallback);
@@ -900,48 +875,6 @@ public class FloatService extends Service {
                     hideBallOverlay();
                     showFloatWindow();
                 });
-            }
-        }).start();
-    }
-
-    /** plan_operation：收集当前界面 + 操作地图，让 AI 规划后再执行 */
-    private void planOperation(String goal, String app) {
-        planRequired = false;
-        appendAIOutput("🗺️ 分析: " + (app.isEmpty() ? goal : app + " - " + goal));
-        new Thread(() -> {
-            try {
-                // 1. 获取当前屏幕内容
-                String screenText = ShizukuAccessibilityService.lastScreenText;
-                String structure = ShizukuAccessibilityService.lastScreenStructure;
-                String currentApp = ShizukuAccessibilityService.currentAppName;
-
-                // 2. 获取 UI 操作地图
-                String uimapData = "";
-                if (uiMapRecorder != null && uiMapRecorder.getTotalActions() > 0) {
-                    uimapData = uiMapRecorder.exportForAI();
-                }
-
-                // 3. 组装信息
-                StringBuilder info = new StringBuilder();
-                info.append("=== 当前屏幕信息 ===\n");
-                if (currentApp != null) info.append("当前应用: ").append(currentApp).append("\n");
-                if (screenText != null && !screenText.isEmpty()) {
-                    info.append("屏幕文字: ").append(screenText).append("\n");
-                }
-                if (structure != null && !structure.isEmpty()) {
-                    info.append("可见控件:\n").append(structure).append("\n");
-                }
-                if (!uimapData.isEmpty()) {
-                    info.append("\n=== UI 操作地图 ===\n").append(uimapData).append("\n");
-                }
-                info.append("\n=== 用户目标 ===\n").append(goal);
-                if (!app.isEmpty()) info.append("\n目标应用: ").append(app);
-
-                String resultStr = info.toString();
-                appendAIOutput("🗺️ " + resultStr.substring(0, Math.min(resultStr.length(), 500)));
-                aiAgent.submitToolResult("plan_operation", resultStr, aiCallback);
-            } catch (Exception e) {
-                aiAgent.submitToolResult("plan_operation", "[错误] " + e.getMessage(), aiCallback);
             }
         }).start();
     }
@@ -983,15 +916,29 @@ public class FloatService extends Service {
         aiAgent.submitToolResult("set_alarm", "闹钟已设置: " + hour + ":" + String.format("%02d", minutes) + (message.isEmpty() ? "" : " (" + message + ")"), aiCallback);
     }
 
-    private void readUiMap() {
-        if (uiMapRecorder == null || uiMapRecorder.getTotalActions() == 0) {
+    private void readUiMap(JSONObject params) {
+        if (uiMapRecorder == null) {
+            // 读数据前自动初始化和加载历史记录
+            uiMapRecorder = new UiMapRecorder(this);
+            ShizukuAccessibilityService.uiMapRecorder = uiMapRecorder;
+            uiMapRecorder.start();
+            uiMapRecorder.stop(); // 加载完立即停，不干扰手动录制
+        }
+        if (uiMapRecorder.getTotalActions() == 0) {
             aiAgent.submitToolResult("read_uimap", "（当前没有录制到任何操作数据，请先使用手机后再查询）", aiCallback);
             return;
         }
         String exported = uiMapRecorder.exportForAI();
-        String summary = "UI 操作地图已生成，共 " + uiMapRecorder.getTotalActions() + " 条操作记录。\n" + exported;
-        appendAIOutput("🗺️ " + summary.substring(0, Math.min(summary.length(), 500)));
-        aiAgent.submitToolResult("read_uimap", summary, aiCallback);
+        String goal = params != null ? params.optString("goal", "") : "";
+        String route = uiMapRecorder.suggestRoute(goal);
+        StringBuilder summary = new StringBuilder();
+        summary.append("UI 操作地图已生成，共 ").append(uiMapRecorder.getTotalActions()).append(" 条操作记录。\n").append(exported);
+        if (!route.isEmpty()) {
+            summary.append("\n").append(route);
+        }
+        String result = summary.toString();
+        appendAIOutput("🗺️ " + result.substring(0, Math.min(result.length(), 500)));
+        aiAgent.submitToolResult("read_uimap", result, aiCallback);
     }
 
     private void createNote(String content, String title) {
@@ -1052,9 +999,6 @@ public class FloatService extends Service {
         // 确保adb命令库已初始化
         AdbCommands.init(this);
 
-        // 把文本包装一下，让AI先去查记忆
-        pendingPlanGoal = text;
-        planRequired = true;
         aiAgent.sendMessage(text, aiCallback);
     }
 
@@ -1419,14 +1363,46 @@ public class FloatService extends Service {
     /** 读屏幕：获取无障碍服务捕获的当前屏幕文字 + 节点结构信息 */
     private void readScreenContent() {
         try {
-            // 触发深度捕获
-            if (ShizukuAccessibilityService.isRunning) {
-                ShizukuAccessibilityService.requestDetailedScreenCapture();
-                try { Thread.sleep(300); } catch (InterruptedException ignored) {}
+            // 用 dumpsys 修正被浮窗/SystemUI 覆写的 currentPackage
+            String capturedPkg = ShizukuAccessibilityService.currentPackage;
+            String capturedApp = ShizukuAccessibilityService.currentAppName;
+            {
+                if (capturedPkg == null || capturedPkg.isEmpty() || "com.shizuku.ai".equals(capturedPkg)
+                    || "com.android.systemui".equals(capturedPkg)
+                    || "com.bbk.launcher2".equals(capturedPkg)
+                    || "android".equals(capturedPkg)) {
+                    String resolvedPkg = resolveForegroundPackage();
+                    if (resolvedPkg != null && !resolvedPkg.isEmpty() && !resolvedPkg.equals(capturedPkg)) {
+                        Log.d(TAG, "readScreenContent: 修正 currentPackage " + capturedPkg + " → " + resolvedPkg);
+                        capturedPkg = resolvedPkg;
+                        capturedApp = resolveAppName(resolvedPkg);
+                        ShizukuAccessibilityService.currentPackage = resolvedPkg;
+                        ShizukuAccessibilityService.currentAppName = capturedApp;
+                    }
+                }
             }
 
-            String app = ShizukuAccessibilityService.currentAppName;
-            String pkg = ShizukuAccessibilityService.currentPackage;
+            // 触发深度捕获——复杂页面（如同花顺）需等待无障碍树遍历完成
+            if (ShizukuAccessibilityService.isRunning) {
+                String oldStructure = ShizukuAccessibilityService.lastScreenStructure;
+                String oldText = ShizukuAccessibilityService.lastScreenText;
+                Log.d(TAG, "=== READ_SCREEN === 请求捕获 旧数据 text=" + (oldText != null ? oldText.substring(0, Math.min(100, oldText.length())) : "null") + " struct=" + (oldStructure != null ? oldStructure.substring(0, Math.min(100, oldStructure.length())) : "null"));
+                ShizukuAccessibilityService.requestDetailedScreenCapture();
+                // 最多等 1.5s，每 300ms 检查一次数据是否刷新
+                int waited = 0;
+                for (int retry = 0; retry < 5; retry++) {
+                    try { Thread.sleep(300); } catch (InterruptedException ignored) {}
+                    waited += 300;
+                    if (!ShizukuAccessibilityService.lastScreenStructure.equals(oldStructure)
+                        || !ShizukuAccessibilityService.lastScreenText.equals(oldText)) {
+                        Log.d(TAG, "数据刷新完成，等待了" + waited + "ms");
+                        break;
+                    }
+                }
+            }
+
+            String app = capturedApp;
+            String pkg = capturedPkg;
             String screenText = ShizukuAccessibilityService.lastScreenText;
             String structure = ShizukuAccessibilityService.lastScreenStructure;
 
@@ -1458,10 +1434,38 @@ public class FloatService extends Service {
                     result.append("\n\n屏幕不含文字或交互控件。");
                 }
             }
+            // 记录关键调试信息
+            String textPreview = screenText != null ? screenText.substring(0, Math.min(200, screenText.length())) : "null";
+            String structPreview = structure != null ? structure.substring(0, Math.min(200, structure.length())) : "null";
+            Log.d(TAG, "readScreen 返回给AI: app=" + app + " pkg=" + pkg + " text=" + textPreview + " struct=" + structPreview);
+            // 统计可见控件数量
+            int midCount = 0;
+            if (structure != null) {
+                int idx = 0;
+                while ((idx = structure.indexOf("中点(", idx)) != -1) { midCount++; idx += 3; }
+            }
+            Log.d(TAG, "可见控件含 " + midCount + " 个带中点坐标的元素");
 
             String resultStr = result.toString();
             appendAIOutput("📱 " + (app != null ? app : "未知"));
-            aiAgent.submitToolResult("read_screen", resultStr, aiCallback);
+
+            // 回想机制：读屏后注入地图路线，防止AI看到新数据后放飞
+            if (uiMapRecorder == null) {
+                uiMapRecorder = new UiMapRecorder(this);
+                ShizukuAccessibilityService.uiMapRecorder = uiMapRecorder;
+                uiMapRecorder.start();
+                uiMapRecorder.stop();
+            }
+            StringBuilder recallResult = new StringBuilder(resultStr);
+            if (uiMapRecorder.getTotalActions() > 0) {
+                recallResult.append("\n\n🗺️ 操作路线图（按此路线走，不要偏离）:\n");
+                String mapData = uiMapRecorder.exportForAI();
+                if (mapData.length() > 2000) mapData = mapData.substring(0, 2000) + "\n...（已截断，可用 read_uimap 看完整版）";
+                recallResult.append(mapData);
+            }
+            recallResult.append("\n\n🔄 点击规则：坐标直接用上面\"可见控件\"里的\"中点(x,y)\"，不要自己计算。如果目标按钮不在可见控件中，告知用户坐标不可用。");
+
+            aiAgent.submitToolResult("read_screen", recallResult.toString(), aiCallback);
         } catch (Exception e) {
             Log.e(TAG, "readScreenContent 异常: " + e.getMessage());
             appendAIOutput("📱 读取失败");
@@ -1648,8 +1652,186 @@ public class FloatService extends Service {
 
     // 命令收藏功能已移除，保留CMD模式作为备用直接执行
 
+    // ====== API 服务器 ======
+
+    /** API 请求分发（供 ApiServer 调用，返回 JSON） */
+    private String handleApiRequest(String method, String path, String query, String body) {
+        try {
+            org.json.JSONObject result = new org.json.JSONObject();
+            switch (path) {
+                case "/health":
+                    result.put("status", "ok");
+                    result.put("apiRunning", true);
+                    result.put("accessibilityRunning", ShizukuAccessibilityService.isRunning);
+                    result.put("shizukuGranted", ShizukuShell.isGranted());
+                    break;
+                case "/read_screen":
+                    result.put("ok", true);
+                    result.put("data", readScreenSync());
+                    break;
+                case "/click":
+                    org.json.JSONObject clickParams = new org.json.JSONObject(body != null ? body : "{}");
+                    result.put("ok", true);
+                    result.put("data", clickScreenSync(clickParams));
+                    break;
+                case "/shell":
+                    org.json.JSONObject shellParams = new org.json.JSONObject(body != null ? body : "{}");
+                    String command = shellParams.optString("command", "");
+                    result.put("ok", true);
+                    result.put("data", shellSync(command));
+                    break;
+                case "/uimap":
+                    result.put("ok", true);
+                    result.put("data", readUiMapSync(query));
+                    break;
+                default:
+                    result.put("ok", false);
+                    result.put("error", "未知路径: " + path + "，可用: /health /read_screen /click /shell /uimap");
+                    break;
+            }
+            return result.toString(2);
+        } catch (Exception e) {
+            try {
+                org.json.JSONObject err = new org.json.JSONObject();
+                err.put("ok", false);
+                err.put("error", e.getMessage());
+                return err.toString(2);
+            } catch (Exception ex) {
+                return "{\"ok\":false,\"error\":\"internal error\"}";
+            }
+        }
+    }
+
+    /** 同步读屏（API 用） — 自动解决浮窗/SystemUI导致的包名覆盖 */
+    private org.json.JSONObject readScreenSync() throws Exception {
+        // 用 dumpsys 解析真正的前台 App 包名
+        // 解决：浮窗在前台 → currentPackage=com.shizuku.ai
+        //       vivo bug → currentPackage=com.android.systemui
+        String capturedPkg = ShizukuAccessibilityService.currentPackage;
+        String capturedApp = ShizukuAccessibilityService.currentAppName;
+        if (capturedPkg == null || capturedPkg.isEmpty() || "com.shizuku.ai".equals(capturedPkg)
+            || "com.android.systemui".equals(capturedPkg)
+            || "com.bbk.launcher2".equals(capturedPkg)
+            || "android".equals(capturedPkg)) {
+            String realPkg = resolveForegroundPackage();
+            if (realPkg != null && !realPkg.isEmpty() && !realPkg.equals(capturedPkg)) {
+                Log.d(TAG, "readScreenSync: 修正 currentPackage " + capturedPkg + " → " + realPkg);
+                capturedPkg = realPkg;
+                capturedApp = resolveAppName(realPkg);
+                ShizukuAccessibilityService.currentPackage = realPkg;
+                ShizukuAccessibilityService.currentAppName = capturedApp;
+            }
+        }
+
+        if (ShizukuAccessibilityService.isRunning) {
+            String oldStructure = ShizukuAccessibilityService.lastScreenStructure;
+            String oldText = ShizukuAccessibilityService.lastScreenText;
+            ShizukuAccessibilityService.requestDetailedScreenCapture();
+            for (int retry = 0; retry < 5; retry++) {
+                try { Thread.sleep(300); } catch (InterruptedException ignored) {}
+                if (!ShizukuAccessibilityService.lastScreenStructure.equals(oldStructure)
+                    || !ShizukuAccessibilityService.lastScreenText.equals(oldText)) break;
+            }
+        }
+        org.json.JSONObject data = new org.json.JSONObject();
+        data.put("app", capturedApp != null ? capturedApp : "");
+        data.put("package", capturedPkg != null ? capturedPkg : "");
+        data.put("text", ShizukuAccessibilityService.lastScreenText != null ? ShizukuAccessibilityService.lastScreenText : "");
+        data.put("structure", ShizukuAccessibilityService.lastScreenStructure != null ? ShizukuAccessibilityService.lastScreenStructure : "");
+        int midCount = 0;
+        String struct = ShizukuAccessibilityService.lastScreenStructure;
+        if (struct != null) {
+            int idx = 0;
+            while ((idx = struct.indexOf("中点(", idx)) != -1) { midCount++; idx += 3; }
+        }
+        data.put("midpointCount", midCount);
+        return data;
+    }
+
+    /** 从 dumpsys 解析真正的前台 App 包名 */
+    private String resolveForegroundPackage() {
+        try {
+            ShellResult sr = ShizukuShell.exec("dumpsys window | grep mCurrentFocus");
+            String output = sr.output;
+            // 格式: mCurrentFocus=Window{... u0 com.hexin.plat.android/com.hexin.plat.android.Hexin type=1}
+            // 或: mCurrentFocus=null\n  mCurrentFocus=Window{... u0 com.xxx/.yyy type=1}
+            String[] lines = output.split("\n");
+            for (String line : lines) {
+                if (line.contains("mCurrentFocus=") && !line.contains("mCurrentFocus=null")) {
+                    int u0Idx = line.indexOf(" u0 ");
+                    if (u0Idx < 0) continue;
+                    String afterU0 = line.substring(u0Idx + 4).trim();
+                    int typeIdx = afterU0.indexOf(" type=");
+                    if (typeIdx > 0) afterU0 = afterU0.substring(0, typeIdx);
+                    // afterU0 现在是 "com.xxx.yyy/com.xxx.yyy.Activity"
+                    String[] parts = afterU0.split("/", 2);
+                    if (parts.length >= 1 && !parts[0].isEmpty()) {
+                        return parts[0];
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "resolveForegroundPackage 失败: " + e.getMessage());
+        }
+        return null;
+    }
+
+    /** 同步点击（API 用） */
+    private org.json.JSONObject clickScreenSync(org.json.JSONObject params) throws Exception {
+        String action = params.optString("action", "tap");
+        String command;
+        if ("back".equals(action)) {
+            command = "input keyevent KEYCODE_BACK";
+        } else {
+            int x = params.optInt("x", 0);
+            int y = params.optInt("y", 0);
+            command = "input tap " + x + " " + y;
+        }
+        ShellResult sr = ShizukuShell.exec(command);
+        org.json.JSONObject data = new org.json.JSONObject();
+        data.put("action", action);
+        data.put("command", command);
+        data.put("exitCode", sr.exitCode);
+        data.put("output", sr.output);
+        return data;
+    }
+
+    /** 同步 Shell（API 用） */
+    private org.json.JSONObject shellSync(String command) throws Exception {
+        ShellResult sr = ShizukuShell.exec(command);
+        org.json.JSONObject data = new org.json.JSONObject();
+        data.put("command", command);
+        data.put("exitCode", sr.exitCode);
+        data.put("output", sr.output);
+        return data;
+    }
+
+    /** 同步读取 UI 地图（API 用） */
+    private org.json.JSONObject readUiMapSync(String query) throws Exception {
+        if (uiMapRecorder == null) {
+            uiMapRecorder = new UiMapRecorder(this);
+            ShizukuAccessibilityService.uiMapRecorder = uiMapRecorder;
+            uiMapRecorder.start();
+            uiMapRecorder.stop();
+        }
+        String goal = "";
+        if (query != null && query.startsWith("goal=")) {
+            goal = query.substring(5);
+        }
+        org.json.JSONObject data = new org.json.JSONObject();
+        data.put("totalActions", uiMapRecorder.getTotalActions());
+        data.put("map", uiMapRecorder.exportForAI());
+        data.put("recentApps", uiMapRecorder.getRecentAppsJson());
+        if (!goal.isEmpty()) {
+            String route = uiMapRecorder.suggestRoute(goal);
+            if (!route.isEmpty()) data.put("suggestedRoute", route);
+        }
+        return data;
+    }
+
     @Override
     public void onDestroy() {
+        if (apiServer != null) apiServer.stop();
         cancelFocusBeforeExit();
         stopUiRecording();
         hideBallOverlay();

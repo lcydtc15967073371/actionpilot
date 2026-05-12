@@ -17,8 +17,10 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 /**
  * AI代理核心 - 工具调用架构（非标签模式）
@@ -37,8 +39,13 @@ public class AIAgent {
     private HttpURLConnection currentConnection = null;
 
     // ===== 工具清单 =====
-    private static final String TOOL_MANIFEST = "" +
-        "输出格式：{\"tool\":\"工具名\",\"params\":{...}} 或数组格式。纯文本直接回复。\n\n" +
+    static final String TOOL_MANIFEST = "" +
+        "输出格式（严格）：{\"tool\":\"工具名\",\"params\":{...}}，不要写成 {\"工具名\":{}}。纯文本直接回复。\n\n" +
+        "示例：{\"tool\":\"read_screen\",\"params\":{}}\n" +
+        "示例：{\"tool\":\"click_screen\",\"params\":{\"action\":\"tap\",\"x\":500,\"y\":1000}}\n\n" +
+        "工作流程：先打开目标App → 用 read_uimap 看操作地图了解页面结构 → 用 read_screen 看当前位置（\"可见控件\"里已标注中点坐标，直接用） → 用 click_screen 执行 → 系统会自动读屏问下一步\n\n" +
+        "点击规则：坐标直接取 read_screen 返回的\"可见控件\"中的 \"中点(x,y)\"，不要自己计算。如果可见控件为空，告知用户坐标不可用。\n\n" +
+        "可用工具：\n" +
         "1. search_web | 搜索 | params: {\"query\": \"\"}\n" +
         "2. browse_url | 打开网页 | params: {\"url\": \"\"}\n" +
         "3. read_page | 读浏览器页面内容 | params: {}\n" +
@@ -51,10 +58,9 @@ public class AIAgent {
         "10. execute_intent | 执行Intent | params: {\"action\": \"\", \"extras\": {...}}\n" +
         "11. learn | 记住经验 | params: {\"key\": \"\", \"value\": \"\"}\n" +
         "12. get_device_info | 设备信息 | params: {}\n" +
-        "13. read_uimap | 读UI操作历史地图 | params: {}\n" +
+        "13. read_uimap | 读UI操作历史地图，传 goal 参数说明需求，系统会结合地图给出路线建议 | params: {\"goal\": \"\"}" +
         "14. create_note | 创建原子笔记 | params: {\"content\": \"\", \"title\": \"\"}\n" +
-        "15. click_screen | 点击/返回。浮窗自动缩球防挡屏。action: tap=x,y坐标 back=返回 | params: {\"action\": \"tap\", \"x\": 0, \"y\": 0} 或 {\"action\": \"back\"}\n" +
-        "16. plan_operation | 【操作App前必调】获取当前屏幕+UI地图，综合分析后输出操作计划再执行 | params: {\"goal\": \"\", \"app\": \"\"}";
+        "15. click_screen | 点击屏幕（坐标直接用 read_screen 里\"可见控件\"的\"中点\"，不要自己算） | params: {\"action\": \"tap\", \"x\": 0, \"y\": 0} 或 {\"action\": \"back\"}";
 
     public interface AICallback {
         void onResponse(String text);
@@ -74,15 +80,18 @@ public class AIAgent {
 
     /** 用户发送消息 */
     public void sendMessage(String userInput, AICallback callback) {
+        Log.d(TAG, "sendMessage: " + userInput);
         if (!tokenManager.hasToken()) {
             callback.onError("请先设置API Token！");
             return;
         }
         resetCancelState();
         conversationHistory.add(new Message("user", userInput));
+        Log.d(TAG, "sendMessage: 队列 executor 任务");
         executor.execute(() -> {
+            Log.d(TAG, "sendMessage: executor 任务开始");
             try {
-                if (cancelled) return;
+                if (cancelled) { Log.d(TAG, "sendMessage: cancelled 跳过"); return; }
                 callAIAPI(callback, false);
             } catch (Exception e) {
                 if (!cancelled) {
@@ -107,6 +116,88 @@ public class AIAgent {
                 }
             }
         });
+    }
+
+    // ===== 阻塞 API（用于 /ai HTTP 端点，复用异步 executor） =====
+
+    /** 阻塞发送消息，返回 JSON */
+    public String sendMessageSync(String userInput) {
+        Log.d(TAG, "sendMessageSync ENTER: " + userInput);
+        if (!tokenManager.hasToken()) return jsonError("Token未设置");
+        return blockOnCallback(cb -> sendMessage(userInput, cb));
+    }
+
+    /** 阻塞提交工具结果，返回 JSON */
+    public String submitToolResultSync(String toolName, String resultStr) {
+        Log.d(TAG, "submitToolResultSync ENTER: " + toolName);
+        if (cancelled) return jsonError("cancelled");
+        return blockOnCallback(cb -> submitToolResult(toolName, resultStr, cb));
+    }
+
+    /** 通用阻塞：在异步回调上等待，返回 JSON */
+    private String blockOnCallback(java.util.function.Consumer<AICallback> invoker) {
+        Log.d(TAG, "blockOnCallback: 创建 latch");
+        final CountDownLatch latch = new CountDownLatch(1);
+        final String[] result = new String[1];
+
+        Log.d(TAG, "blockOnCallback: 调用 invoker");
+        invoker.accept(new AICallback() {
+            @Override
+            public void onResponse(String text) {
+                Log.d(TAG, "blockOnCallback onResponse");
+                setResult(text, null);
+            }
+            @Override
+            public void onError(String error) {
+                Log.e(TAG, "blockOnCallback onError: " + error);
+                setResult(null, error);
+            }
+            @Override
+            public void onToolCall(String toolName, String paramsJson) {
+                Log.d(TAG, "blockOnCallback onToolCall: " + toolName);
+                try {
+                    JSONObject r = new JSONObject();
+                    r.put("type", "tool_call");
+                    r.put("tool", toolName);
+                    r.put("params", new JSONObject(paramsJson));
+                    result[0] = r.toString();
+                } catch (Exception e) { result[0] = jsonError(e.getMessage()); }
+                latch.countDown();
+            }
+            private void setResult(String text, String error) {
+                try {
+                    JSONObject r = new JSONObject();
+                    if (text != null) { r.put("type", "text"); r.put("content", text); }
+                    else { r.put("type", "error"); r.put("content", error != null ? error : "unknown"); }
+                    result[0] = r.toString();
+                } catch (Exception e) { result[0] = jsonError(e.getMessage()); }
+                latch.countDown();
+            }
+        });
+
+        Log.d(TAG, "blockOnCallback: 等待结果...");
+        try {
+            if (!latch.await(120, TimeUnit.SECONDS)) {
+                Log.e(TAG, "blockOnCallback: 超时!");
+                return jsonError("timeout（AI 响应超时）");
+            }
+        } catch (InterruptedException e) {
+            Log.e(TAG, "blockOnCallback: 中断");
+            return jsonError("interrupted");
+        }
+        Log.d(TAG, "blockOnCallback: 完成");
+        return result[0] != null ? result[0] : jsonError("no response");
+    }
+
+    private String jsonError(String msg) {
+        try {
+            JSONObject err = new JSONObject();
+            err.put("type", "error");
+            err.put("content", msg);
+            return err.toString();
+        } catch (Exception e) {
+            return "{\"type\":\"error\",\"content\":\"internal error\"}";
+        }
     }
 
     private void callAIAPI(AICallback callback, boolean isToolResult) throws Exception {
@@ -246,6 +337,27 @@ public class AIAgent {
                         String toolName = first.getString("tool");
                         String params = first.has("params") ? first.getJSONObject("params").toString() : "{}";
                         mainHandler.post(() -> callback.onToolCall(toolName, params));
+                        return;
+                    }
+                }
+            } catch (Exception ignored) {}
+        }
+
+        // 兼容格式：{"read_screen": {}} → 提取 key 作为工具名
+        if (toolJsonStart < 0 && (trimmed.startsWith("{") || trimmed.startsWith("{\n"))) {
+            try {
+                JSONObject altCall = new JSONObject(trimmed);
+                String[] knownTools = {"search_web","browse_url","read_page","read_screen","start_app",
+                    "list_apps","toggle_flashlight","set_alarm","execute_shell","execute_intent",
+                    "learn","get_device_info","read_uimap","create_note","click_screen"};
+                for (String t : knownTools) {
+                    if (altCall.has(t)) {
+                        String params = altCall.get(t).toString();
+                        if (params.equals("{}") || params.startsWith("{")) {
+                            mainHandler.post(() -> callback.onToolCall(t, params));
+                        } else {
+                            mainHandler.post(() -> callback.onToolCall(t, "{}"));
+                        }
                         return;
                     }
                 }

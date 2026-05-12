@@ -198,6 +198,67 @@ public class UiMapRecorder {
         }
     }
 
+    /** 根据用户目标从地图中提炼建议路线 */
+    public String suggestRoute(String goal) {
+        if (goal == null || goal.isEmpty() || totalActions == 0)
+            return "";
+        try {
+            String goalLower = goal.toLowerCase();
+            // 筛选相关跳转边
+            List<UiEdge> relevantEdges = new ArrayList<>();
+            for (UiEdge e : edges) {
+                String label = e.elementLabel.toLowerCase();
+                String fromName = nodeName(e.fromId).toLowerCase();
+                String toName = nodeName(e.toId).toLowerCase();
+                if (label.contains(goalLower) || fromName.contains(goalLower) || toName.contains(goalLower)) {
+                    relevantEdges.add(e);
+                }
+            }
+
+            // 筛选相关操作
+            List<UiAction> relevantActions = new ArrayList<>();
+            for (UiAction a : actions) {
+                if (a.elementLabel.toLowerCase().contains(goalLower)) {
+                    relevantActions.add(a);
+                }
+            }
+
+            StringBuilder sb = new StringBuilder();
+            if (!relevantEdges.isEmpty()) {
+                sb.append("\n📋 根据历史记录的路线建议：\n");
+                // 去重并排序
+                LinkedHashMap<String, Integer> seen = new LinkedHashMap<>();
+                for (UiEdge e : relevantEdges) {
+                    String key = nodeName(e.fromId) + " → [" + e.elementLabel + "] → " + nodeName(e.toId);
+                    if (!seen.containsKey(key)) {
+                        seen.put(key, e.count);
+                        sb.append("  ").append(key).append(" (执行过").append(e.count).append("次)\n");
+                    }
+                }
+                sb.append("\n");
+            }
+            if (!relevantActions.isEmpty()) {
+                sb.append("📌 相关操作：\n");
+                LinkedHashMap<String, Integer> seen = new LinkedHashMap<>();
+                for (UiAction a : relevantActions) {
+                    if (!seen.containsKey(a.elementLabel)) {
+                        seen.put(a.elementLabel, 1);
+                        sb.append("  - ").append(a.elementLabel).append("\n");
+                    }
+                }
+            }
+
+            return sb.length() > 0 ? sb.toString() : "";
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    private String nodeName(String nodeId) {
+        UiNode n = nodes.get(nodeId);
+        return n != null ? n.screenName : nodeId;
+    }
+
     /** 持久化到文件 */
     public void save() {
         try {

@@ -157,10 +157,13 @@ class ShizukuAccessibilityService : AccessibilityService() {
     private fun captureScreen() {
         val allTexts = linkedSetOf<String>()
 
-        // 主方法: rootInActiveWindow（跟 ActionPilot 一致，最可靠）
+        // 主方法: rootInActiveWindow
         val root = try { rootInActiveWindow } catch (_: Exception) { null }
-        Log.d(TAG, "captureScreen: rootInActiveWindow=${root != null} pkg=$currentPackage")
-        if (root != null) {
+        val rootPkg = root?.packageName?.toString() ?: ""
+        Log.d(TAG, "captureScreen: rootInActiveWindow=${root != null} rootPkg=$rootPkg expected=$currentPackage")
+        // vivo bug: rootInActiveWindow 有时返回 systemui/微信 而非前台 App
+        val rootIsCorrect = root != null && (rootPkg == currentPackage || rootPkg.isEmpty())
+        if (rootIsCorrect) {
             try {
                 val r = Rect(); root.getBoundsInScreen(r)
                 Log.d(TAG, "  root: class=${root.className} childCount=${root.childCount} bounds=[${r.left},${r.top},${r.right},${r.bottom}]")
@@ -169,11 +172,16 @@ class ShizukuAccessibilityService : AccessibilityService() {
                 Log.d(TAG, "  collectVisibleText: found ${allTexts.size - before} texts")
             } finally { root.recycle() }
         } else {
-            Log.w(TAG, "  rootInActiveWindow = null (vivo launcher 特征)")
+            if (root != null) {
+                Log.w(TAG, "  rootInActiveWindow 包名不匹配！rootPkg=$rootPkg expected=$currentPackage, 放弃此 root 走 getWindows")
+                root.recycle()
+            } else {
+                Log.w(TAG, "  rootInActiveWindow = null (vivo launcher 特征)")
+            }
         }
 
         // 兜底: getWindows() 遍历所有窗口
-        if (allTexts.isEmpty()) {
+        if (!rootIsCorrect || allTexts.isEmpty()) {
             val windows = try { getWindows() } catch (_: Exception) { null }
             if (windows != null) {
                 Log.d(TAG, "captureScreen: getWindows() returns ${windows.size} windows:")
@@ -183,7 +191,9 @@ class ShizukuAccessibilityService : AccessibilityService() {
                         val r = w.root; val t = w.type; val p = r?.packageName
                         val rect = Rect(); w.getBoundsInScreen(rect)
                         Log.d(TAG, "  win[$wi]: type=$t root=${r != null} pkg=$p bounds=[${rect.left},${rect.top},${rect.right},${rect.bottom}]")
-                        if (r != null && p?.toString() != "com.shizuku.ai" && t != AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY) {
+                        // 过滤：排除自身浮窗（package 为 null 说明是 WindowManager 直接添加的视图层）
+                        if (r != null && p != null && p.toString() != "com.shizuku.ai"
+                            && t != AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY) {
                             try {
                                 val before = allTexts.size
                                 collectVisibleText(r, allTexts, 0)
@@ -229,50 +239,64 @@ class ShizukuAccessibilityService : AccessibilityService() {
         captureScreen()
         lastScreenStructure = ""
 
-        // 尝试1: rootInActiveWindow
-        Log.d(TAG, "captureDetailedScreen: 尝试1 rootInActiveWindow")
-        var collected = collectWindowsStructure { rootInActiveWindow }
-        if (collected != null) {
-            Log.d(TAG, "captureDetailedScreen: 尝试1 成功，${collected.size} 个元素")
-            saveStructure(collected)
-            return
+        // 尝试1: rootInActiveWindow（需校验包名匹配，vivo 有时返回 systemui/微信）
+        val root1 = try { rootInActiveWindow } catch (_: Exception) { null }
+        val root1Pkg = root1?.packageName?.toString() ?: ""
+        val root1Valid = root1 != null && (root1Pkg == currentPackage || root1Pkg.isEmpty())
+        if (root1 != null && !root1Valid) {
+            Log.w(TAG, "captureDetailedScreen: rootInActiveWindow 包名=$root1Pkg 不匹配 $currentPackage, 跳过")
         }
-        Log.w(TAG, "captureDetailedScreen: 尝试1 失败")
+        if (root1Valid) {
+            try {
+                val collected = mutableListOf<String>()
+                collectNodeStructure(root1, collected, 0)
+                if (collected.isNotEmpty()) {
+                    Log.d(TAG, "captureDetailedScreen: 尝试1 成功，${collected.size} 个元素")
+                    saveStructure(collected)
+                    return
+                }
+            } finally { root1!!.recycle() }
+            Log.w(TAG, "captureDetailedScreen: 尝试1 空")
+        } else {
+            root1?.recycle()
+        }
 
-        // 尝试2: getWindows() 遍历（解决 vivo 桌面 rootInActiveWindow = null 的问题）
-        Log.d(TAG, "captureDetailedScreen: 尝试2 getWindows()")
+        // 尝试2: getWindows() 遍历（解决 vivo rootInActiveWindow 不可靠的问题）
+        Log.d(TAG, "captureDetailedScreen: 尝试2 getWindows() 目标=$currentPackage")
         val windows = try { getWindows() } catch (_: Exception) { null }
         if (windows != null) {
             Log.d(TAG, "  getWindows() = ${windows.size} windows")
-            val allElements = mutableListOf<String>()
-            var wi = 0
-            for (window in windows) {
-                try {
-                    val winRoot = window.root
-                    if (winRoot == null) {
-                        Log.d(TAG, "  win[$wi]: root=null type=${window.type}")
-                        wi++; continue
-                    }
+
+            // 先找完全匹配当前前台 App 的窗口
+            for (pass in 0..1) { // pass0=精确匹配, pass1=任意合法窗口
+                val collected = mutableListOf<String>()
+                var wi = 0
+                for (window in windows) {
                     try {
-                        val pkg = winRoot.packageName?.toString() ?: ""
-                        if (pkg == "com.shizuku.ai") { wi++; continue }
-                        if (window.type == AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY) { wi++; continue }
-                        val before = allElements.size
-                        collectNodeStructure(winRoot, allElements, 0)
-                        Log.d(TAG, "  win[$wi]: type=${window.type} pkg=$pkg nodes=${allElements.size - before}")
-                    } finally { winRoot.recycle() }
-                } catch (_: Exception) {
-                } finally {
-                    try { window.recycle() } catch (_: Exception) {}
+                        val winRoot = window.root
+                        if (winRoot == null) { wi++; continue }
+                        try {
+                            val pkg = winRoot.packageName?.toString() ?: ""
+                            if (pkg == "com.shizuku.ai" || pkg.isEmpty()) { wi++; continue }
+                            if (window.type == AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY) { wi++; continue }
+                            if (pass == 0 && pkg != currentPackage) { wi++; continue } // pass0: 只要精确匹配
+                            val before = collected.size
+                            collectNodeStructure(winRoot, collected, 0)
+                            Log.d(TAG, "  win[$wi]: pass=$pass type=${window.type} pkg=$pkg nodes=${collected.size - before}")
+                        } finally { winRoot.recycle() }
+                    } catch (_: Exception) {
+                    } finally {
+                        try { window.recycle() } catch (_: Exception) {}
+                    }
+                    wi++
                 }
-                wi++
+                if (collected.isNotEmpty()) {
+                    Log.d(TAG, "captureDetailedScreen: 尝试2 pass=$pass 成功，${collected.size} 个元素")
+                    saveStructure(collected)
+                    return
+                }
             }
-            if (allElements.isNotEmpty()) {
-                Log.d(TAG, "captureDetailedScreen: 尝试2 成功，${allElements.size} 个元素")
-                saveStructure(allElements)
-                return
-            }
-            Log.w(TAG, "captureDetailedScreen: 尝试2 无有效元素")
+            Log.w(TAG, "captureDetailedScreen: 尝试2 所有 pass 无有效元素")
         } else {
             Log.w(TAG, "captureDetailedScreen: getWindows() = null")
         }
@@ -311,7 +335,7 @@ class ShizukuAccessibilityService : AccessibilityService() {
     }
 
     private fun saveStructure(elements: MutableList<String>) {
-        val detail = elements.take(100).joinToString("\n")
+        val detail = elements.take(300).joinToString("\n")
         lastScreenStructure = detail
         Log.d(TAG, "屏幕结构: ${elements.size} 个元素")
     }
@@ -340,7 +364,7 @@ class ShizukuAccessibilityService : AccessibilityService() {
 
             val rect = Rect()
             node.getBoundsInScreen(rect)
-            val bounds = if (rect.isEmpty) "" else "[${rect.left},${rect.top},${rect.right},${rect.bottom}]"
+            val bounds = if (rect.isEmpty) "" else "中点(${(rect.left+rect.right)/2},${(rect.top+rect.bottom)/2}) [${rect.left},${rect.top},${rect.right},${rect.bottom}]"
 
             val parts = mutableListOf(cls)
             if (label.isNotBlank()) parts.add("\"$label\"")
