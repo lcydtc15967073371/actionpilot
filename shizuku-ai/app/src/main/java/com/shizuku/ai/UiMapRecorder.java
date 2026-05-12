@@ -336,6 +336,11 @@ public class UiMapRecorder {
                 f.put("trigger", edge.elementLabel);
                 f.put("to", to != null ? to.screenName : edge.toId);
                 f.put("count", edge.count);
+                // 泛控件 ID 的 trigger（如 usual_item_root），附上源页面屏幕内容供 AI 参考
+                if (isGenericId(edge.elementLabel)) {
+                    String ctx = getLastScreenContentForNode(edge.fromId);
+                    if (!ctx.isEmpty()) f.put("screen", ctx);
+                }
                 flows.put(f);
             }
             root.put("flows", flows);
@@ -595,6 +600,27 @@ public class UiMapRecorder {
 
     public boolean isRecording() { return recording; }
     public int getTotalActions() { return totalActions; }
+
+    /** 泛控件 ID 检测：无中文，看起来像资源名 */
+    private boolean isGenericId(String label) {
+        if (label == null || label.isEmpty()) return true;
+        for (char c : label.toCharArray()) {
+            if (c >= 0x4E00 && c <= 0x9FFF) return false;
+        }
+        return true;
+    }
+
+    /** 获取节点最近一条 SCREEN_CONTENT（截短 120 字） */
+    private String getLastScreenContentForNode(String nodeId) {
+        for (int i = actions.size() - 1; i >= 0; i--) {
+            UiAction a = actions.get(i);
+            if ("SCREEN_CONTENT".equals(a.actionType) && nodeId.equals(a.nodeId)) {
+                String label = a.elementLabel;
+                return label.length() > 120 ? label.substring(0, 120) : label;
+            }
+        }
+        return "";
+    }
 
     public static String nodeId(String appPackage, String screenName) {
         return appPackage + "#" + screenName;
