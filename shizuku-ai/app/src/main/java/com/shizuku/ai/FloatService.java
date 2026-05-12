@@ -42,6 +42,9 @@ import android.hardware.camera2.CameraManager;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
@@ -772,6 +775,15 @@ public class FloatService extends Service {
                 case "execute_shell":
                     executeShell(params.optString("command", ""));
                     break;
+                case "write_file":
+                    writeFile(params.optString("path", ""), params.optString("content", ""));
+                    break;
+                case "read_file":
+                    readFile(params.optString("path", ""));
+                    break;
+                case "list_files":
+                    listFiles(params.optString("path", "."));
+                    break;
                 case "click_screen":
                     clickScreen(params);
                     break;
@@ -810,16 +822,111 @@ public class FloatService extends Service {
     }
 
     private void executeShell(String command) {
-        appendAIOutput("📋 执行: " + command);
+        final String finalCommand;
+        String filesDir = getFilesDir().getAbsolutePath();
+        String rishPath = "/data/data/com.termux/files/home/rish";
+
+        // @termux 前缀：通过 rish 桥接到 Termux 执行（可用 Python/bash/packages）
+        if (command.startsWith("@termux ")) {
+            String termuxCmd = command.substring(8).trim();
+            // 替换相对路径为 app 内部目录绝对路径
+            String resolved = termuxCmd.replaceAll("\\b(\\./)?([a-zA-Z_][a-zA-Z0-9_./-]*\\.(py|sh|json|txt))",
+                filesDir + "/$2");
+            finalCommand = "sh " + rishPath + " -c 'run-as com.termux " + resolved + "'";
+        } else if (command.contains("\n")) {
+            // 多行命令：写临时脚本文件执行
+            String scriptName = "_script_" + System.currentTimeMillis() + ".sh";
+            try {
+                File target = new File(getFilesDir(), scriptName);
+                File parent = target.getParentFile();
+                if (parent != null) parent.mkdirs();
+                FileOutputStream fos = new FileOutputStream(target);
+                fos.write(("#!/system/bin/sh\n" + command).getBytes("UTF-8"));
+                fos.close();
+                finalCommand = "sh " + target.getAbsolutePath();
+            } catch (Exception e) {
+                aiAgent.submitToolResult("execute_shell", "[错误] 写脚本失败: " + e.getMessage(), aiCallback);
+                return;
+            }
+        } else {
+            finalCommand = command;
+        }
+        appendAIOutput("📋 执行: " + finalCommand);
         new Thread(() -> {
             try {
-                ShellResult result = ShizukuShell.exec(command);
+                ShellResult result = ShizukuShell.exec(finalCommand);
                 String output = result.output.length() > 0 ? result.output : "(无输出)";
                 aiAgent.submitToolResult("execute_shell", "退出码:" + result.exitCode + "\n" + output, aiCallback);
             } catch (Exception e) {
                 aiAgent.submitToolResult("execute_shell", "[错误] " + e.getMessage(), aiCallback);
             }
         }).start();
+    }
+
+    /** 写文件到 app 内部目录 */
+    private void writeFile(String path, String content) {
+        try {
+            File target = new File(getFilesDir(), path);
+            File parent = target.getParentFile();
+            if (parent != null && !parent.exists()) {
+                parent.mkdirs();
+            }
+            FileOutputStream fos = new FileOutputStream(target);
+            fos.write(content.getBytes("UTF-8"));
+            fos.close();
+            appendAIOutput("📝 已写入: " + path + " (" + content.length() + " 字符)");
+            aiAgent.submitToolResult("write_file", "已写入文件: " + path + " (" + content.length() + " 字符)", aiCallback);
+        } catch (Exception e) {
+            aiAgent.submitToolResult("write_file", "[错误] " + e.getMessage(), aiCallback);
+        }
+    }
+
+    /** 读取 app 内部目录的文件 */
+    private void readFile(String path) {
+        try {
+            File target = new File(getFilesDir(), path);
+            if (!target.exists()) {
+                aiAgent.submitToolResult("read_file", "[错误] 文件不存在: " + path, aiCallback);
+                return;
+            }
+            long fileLen = target.length();
+            int readLen = (int) Math.min(fileLen, 10000);
+            FileInputStream fis = new FileInputStream(target);
+            byte[] data = new byte[readLen];
+            int actuallyRead = fis.read(data);
+            fis.close();
+            String content = new String(data, 0, actuallyRead, "UTF-8");
+            appendAIOutput("📄 " + path + " (" + fileLen + " 字节, 显示 " + content.length() + ")");
+            aiAgent.submitToolResult("read_file", "文件 " + path + " (" + fileLen + " 字节):\n" + content, aiCallback);
+        } catch (Exception e) {
+            aiAgent.submitToolResult("read_file", "[错误] " + e.getMessage(), aiCallback);
+        }
+    }
+
+    /** 列出 app 内部目录的文件 */
+    private void listFiles(String path) {
+        try {
+            File dir = new File(getFilesDir(), path);
+            if (!dir.exists() || !dir.isDirectory()) {
+                aiAgent.submitToolResult("list_files", "目录不存在: " + path, aiCallback);
+                return;
+            }
+            File[] files = dir.listFiles();
+            if (files == null || files.length == 0) {
+                aiAgent.submitToolResult("list_files", "目录 " + path + " 为空", aiCallback);
+                return;
+            }
+            StringBuilder sb = new StringBuilder();
+            for (File f : files) {
+                sb.append(f.isDirectory() ? "[dir]  " : "[file] ")
+                  .append(f.getName())
+                  .append(" (").append(f.length()).append(" 字节)\n");
+            }
+            appendAIOutput("📁 " + path + ": " + files.length + " 项");
+            aiAgent.submitToolResult("list_files", "目录 " + path + " 内容:\n" + sb.toString(), aiCallback);
+        } catch (Exception e) {
+            aiAgent.submitToolResult("list_files", "[错误] " + e.getMessage(), aiCallback);
+        }
     }
 
     /** 点击屏幕坐标：浮窗自动缩小为球避免挡住点击区域，点击后触发回想 */
@@ -1712,9 +1819,15 @@ public class FloatService extends Service {
                     result.put("ok", true);
                     result.put("data", readUiMapSync(query));
                     break;
+                case "/install":
+                    org.json.JSONObject installParams = new org.json.JSONObject(body != null ? body : "{}");
+                    String apkPath = installParams.optString("path", "");
+                    result.put("ok", true);
+                    result.put("data", installApkSync(apkPath));
+                    break;
                 default:
                     result.put("ok", false);
-                    result.put("error", "未知路径: " + path + "，可用: /health /read_screen /click /shell /uimap");
+                    result.put("error", "未知路径: " + path + "，可用: /health /read_screen /click /shell /uimap /install");
                     break;
             }
             return result.toString(2);
@@ -1857,6 +1970,65 @@ public class FloatService extends Service {
         } else {
             data.put("map", uiMapRecorder.exportSummaryForAI());
         }
+        return data;
+    }
+
+    /** 静默安装 APK（API 用） */
+    private org.json.JSONObject installApkSync(String apkPath) throws Exception {
+        org.json.JSONObject data = new org.json.JSONObject();
+        data.put("path", apkPath);
+
+        File apkFile = new File(apkPath);
+        if (!apkFile.exists()) {
+            data.put("success", false);
+            data.put("message", "文件不存在: " + apkPath);
+            return data;
+        }
+
+        boolean canRead = apkFile.canRead();
+        // 某些路径 (如 /data/local/tmp/) 对 App 不可读，需要先复制到缓存目录
+        if (!canRead) {
+            // 先尝试通过 Shizuku shell 读取（可处理 /data/local/tmp/ 等受限路径）
+            try {
+                byte[] fileBytes = ShizukuShell.readFileBytes(apkPath);
+                java.io.File cacheFile = new java.io.File(getCacheDir(), "install_temp.apk");
+                java.io.FileOutputStream fos = new java.io.FileOutputStream(cacheFile);
+                try {
+                    fos.write(fileBytes);
+                } finally {
+                    fos.close();
+                }
+                apkFile = cacheFile;
+                data.put("copiedFromShizuku", true);
+            } catch (Exception e) {
+                // Fallback: 尝试直接 FileInputStream（如 /sdcard/ 等路径）
+                java.io.File cacheFile = new java.io.File(getCacheDir(), "install_temp.apk");
+                java.io.FileInputStream fis = null;
+                java.io.FileOutputStream fos = null;
+                try {
+                    fis = new java.io.FileInputStream(apkFile);
+                    fos = new java.io.FileOutputStream(cacheFile);
+                    byte[] buf = new byte[65536];
+                    int n;
+                    while ((n = fis.read(buf)) >= 0) fos.write(buf, 0, n);
+                    apkFile = cacheFile;
+                    data.put("copiedToCache", true);
+                } finally {
+                    if (fis != null) fis.close();
+                    if (fos != null) fos.close();
+                }
+            }
+        }
+
+        SilentInstaller installer = new SilentInstaller(this);
+        String result = installer.install(apkFile);
+        data.put("message", result);
+
+        // 清理缓存文件
+        if (apkFile.getAbsolutePath().startsWith(getCacheDir().getAbsolutePath())) {
+            apkFile.delete();
+        }
+
         return data;
     }
 

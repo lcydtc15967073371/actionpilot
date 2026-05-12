@@ -56,13 +56,16 @@ public class AIAgent {
         "6. list_apps | 列出应用 | params: {\"keyword\": \"\"}\n" +
         "7. toggle_flashlight | 手电筒开关 | params: {}\n" +
         "8. set_alarm | 设闹钟。hour 为 0-23（24 小时制），注意当前时间判断 AM/PM。例：下午 1:45 = hour=13, minutes=45 | params: {\"hour\": 0, \"minutes\": 0, \"message\": \"\"}\n" +
-        "9. execute_shell | 执行Shell命令 | params: {\"command\": \"\"}\n" +
+        "9. execute_shell | 执行Shell命令。支持多行脚本（自动写入临时文件执行）。加 @termux 前缀可调 Termux 的 Python/bash（如 @termux python script.py）。配合 write_file/read_file 可写脚本跑任意逻辑。 | params: {\"command\": \"\"}\n" +
         "10. execute_intent | 执行Intent | params: {\"action\": \"\", \"extras\": {...}}\n" +
         "11. learn | 记住经验 | params: {\"key\": \"\", \"value\": \"\"}\n" +
         "12. get_device_info | 设备信息 | params: {}\n" +
         "13. read_uimap | 读UI操作历史地图（已录制的操作记录）。传 goal 搜索相关内容，返回匹配的 App/操作/路径。搜不到精确结果时换相关关键词再试（如目标在 A 页面，尝试搜索 A 所属 App 名）。 | params: {\"goal\": \"关键词如'设置闹钟''支付宝''台州码'\"}\n" +
         "14. create_note | 创建原子笔记 | params: {\"content\": \"\", \"title\": \"\"}\n" +
-        "15. click_screen | 点击屏幕（坐标直接用 read_screen 里\"可见控件\"的\"中点\"，不要自己算） | params: {\"action\": \"tap\", \"x\": 0, \"y\": 0} 或 {\"action\": \"back\"}";
+        "15. click_screen | 点击屏幕（坐标直接用 read_screen 里\"可见控件\"的\"中点\"，不要自己算） | params: {\"action\": \"tap\", \"x\": 0, \"y\": 0} 或 {\"action\": \"back\"}\n" +
+        "16. write_file | 写文件到手机（路径相对于 app 内部目录），用于保存脚本/数据 | params: {\"path\": \"script.sh\", \"content\": \"#!/system/bin/sh\\necho hello\"}\n" +
+        "17. read_file | 读取之前写的文件内容 | params: {\"path\": \"script.sh\"}\n" +
+        "18. list_files | 列出 app 内部目录的文件 | params: {\"path\": \".\"}";
 
     public interface AICallback {
         void onResponse(String text);

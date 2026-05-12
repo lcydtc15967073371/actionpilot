@@ -11,8 +11,8 @@ android {
         applicationId "com.shizuku.ai"
         minSdk 24
         targetSdk 32
-        versionCode 16
-        versionName "1.6.9"
+        versionCode 19
+        versionName "1.8.1"
     }
 
     buildTypes {
@@ -53,4 +53,7 @@ dependencies {
 
     // JSON解析
     implementation "org.json:json:20231013"
+
+    // Hidden API 绕过（Android 14 限制反射调框架类）
+    implementation "org.lsposed.hiddenapibypass:hiddenapibypass:4.3"
 }

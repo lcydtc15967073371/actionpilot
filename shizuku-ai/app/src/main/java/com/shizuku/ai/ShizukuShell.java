@@ -1,6 +1,7 @@
 package com.shizuku.ai;
 
 import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
@@ -98,6 +99,9 @@ public class ShizukuShell {
             os.write(fullCmd.getBytes());
             os.flush();
 
+            // 关掉 stdin，让 shell 收到 EOF 后退出，否则读 stderr 会死锁
+            os.close();
+
             // 4. 读取输出
             StringBuilder output = new StringBuilder();
             String line;
@@ -113,6 +117,22 @@ public class ShizukuShell {
 
             // 5. 清理输出末尾多余的换行
             String result = output.toString().trim();
+
+            // 5b. 读取 stderr（如有）
+            InputStream es = process.getErrorStream();
+            BufferedReader errReader = new BufferedReader(new InputStreamReader(es));
+            StringBuilder errOutput = new StringBuilder();
+            String errLine;
+            while ((errLine = errReader.readLine()) != null) {
+                errOutput.append(errLine).append("\n");
+            }
+            errReader.close();
+            if (errOutput.length() > 0) {
+                String errStr = errOutput.toString().trim();
+                if (!errStr.isEmpty()) {
+                    result = result.isEmpty() ? errStr : result + "\n[stderr]\n" + errStr;
+                }
+            }
 
             // 处理特殊返回值
             if (exitCode == 0 && result.isEmpty()) {
@@ -146,5 +166,50 @@ public class ShizukuShell {
     public static String execSimple(String cmd) {
         ShellResult r = exec(cmd);
         return r.exitCode == 0 ? r.output : "失败(" + r.exitCode + "): " + r.output;
+    }
+
+    /**
+     * 通过 Shizuku 读取文件的原始字节（二进制安全）
+     * 用于 app 无权直接访问的路径（如 /data/local/tmp/）
+     *
+     * 先用 stat 获取文件大小，再读精确字节数，避免二进制内容中有标记冲突
+     */
+    public static byte[] readFileBytes(String path) throws Exception {
+        // 1. 先获取文件大小
+        ShellResult sizeResult = exec("stat -c %s \"" + path.replace("\"", "\\\"") + "\"");
+        if (sizeResult.exitCode != 0) {
+            throw new Exception("无法获取文件大小: " + sizeResult.output);
+        }
+        long fileSize = Long.parseLong(sizeResult.output.trim());
+
+        // 2. 通过 Shizuku 进程 cat 文件
+        Process process = getShizukuProcess();
+        if (process == null) {
+            throw new Exception("无法获取 Shizuku shell 进程");
+        }
+
+        OutputStream os = process.getOutputStream();
+        InputStream is = process.getInputStream();
+
+        String cmd = "cat \"" + path.replace("\"", "\\\"") + "\"\n";
+        os.write(cmd.getBytes());
+        os.flush();
+        // 不关 stdin，后续读取精确字节数后关闭
+        os.close();
+
+        // 3. 读取精确字节数
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream((int) fileSize);
+        byte[] readBuf = new byte[8192];
+        long remaining = fileSize;
+        int n;
+        while (remaining > 0 && (n = is.read(readBuf, 0, (int) Math.min(readBuf.length, remaining))) != -1) {
+            buffer.write(readBuf, 0, n);
+            remaining -= n;
+        }
+
+        is.close();
+        process.destroy();
+
+        return buffer.toByteArray();
     }
 }

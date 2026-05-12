@@ -50,6 +50,10 @@
             android:enabled="true"
             android:exported="true"
             android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
+
+        <receiver
+            android:name=".InstallReceiver"
+            android:exported="false" />
     </application>
 
 </manifest>
