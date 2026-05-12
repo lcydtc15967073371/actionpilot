@@ -275,14 +275,20 @@ public class UiMapRecorder {
                 return "{\"message\":\"未找到与「" + goal + "」相关的操作记录\",\"totalActions\":" + totalActions + "}";
             }
 
-            // 3. 过滤跳转边：两端都在匹配节点中，或 label 匹配关键词（避免拉入无关枢纽节点）
+            // 3. 过滤跳转边：保留导航路径但限制数量，避免枢纽节点（桌面/交互池）拉入大量无关边
             List<UiEdge> filteredEdges = new ArrayList<>();
+            int oneSideCount = 0;
             for (UiEdge edge : edges) {
                 if (edge.elementLabel.toLowerCase().contains(goalLower)) {
                     filteredEdges.add(edge);
                 } else if (filteredNodes.containsKey(edge.fromId) && filteredNodes.containsKey(edge.toId)) {
-                    // 两端都在匹配节点中才保留，避免枢纽节点（桌面/交互池）拉入大量无关边
-                    filteredEdges.add(edge);
+                    filteredEdges.add(edge); // 两端都匹配，直接保留
+                } else if (filteredNodes.containsKey(edge.fromId) || filteredNodes.containsKey(edge.toId)) {
+                    // 一端匹配（如桌面→支付宝），保留导航路径但限 20 条防膨胀
+                    if (oneSideCount < 20) {
+                        filteredEdges.add(edge);
+                        oneSideCount++;
+                    }
                 }
             }
 
