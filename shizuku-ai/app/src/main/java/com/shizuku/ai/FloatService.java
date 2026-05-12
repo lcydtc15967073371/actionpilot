@@ -45,11 +45,12 @@ import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
-import java.net.URL;
 import java.net.URLEncoder;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 public class FloatService extends Service {
 
@@ -879,6 +880,28 @@ public class FloatService extends Service {
         }).start();
     }
 
+    /** 如果浮窗正显示，缩成球并等待动画完成（可在后台线程调用） */
+    private void hideFloatIfShowing() {
+        if (v != null && v.getVisibility() == View.VISIBLE && !isBallMode) {
+            CountDownLatch latch = new CountDownLatch(1);
+            new Handler(Looper.getMainLooper()).post(() -> {
+                minimizeToBall();
+                latch.countDown();
+            });
+            try { latch.await(500, TimeUnit.MILLISECONDS); } catch (InterruptedException ignored) {}
+            try { Thread.sleep(300); } catch (InterruptedException ignored) {}
+        }
+    }
+
+    /** 恢复浮窗显示（可在后台线程调用） */
+    private void restoreFloat() {
+        new Handler(Looper.getMainLooper()).post(() -> {
+            isBallMode = false;
+            hideBallOverlay();
+            showFloatWindow();
+        });
+    }
+
     private void executeIntent(JSONObject params) {
         String action = params.optString("action", "");
         if (action.isEmpty()) {
@@ -1363,6 +1386,9 @@ public class FloatService extends Service {
     /** 读屏幕：获取无障碍服务捕获的当前屏幕文字 + 节点结构信息 */
     private void readScreenContent() {
         try {
+            // 缩球避免浮窗遮挡 UI 导致读屏不准
+            hideFloatIfShowing();
+
             // 用 dumpsys 修正被浮窗/SystemUI 覆写的 currentPackage
             String capturedPkg = ShizukuAccessibilityService.currentPackage;
             String capturedApp = ShizukuAccessibilityService.currentAppName;
@@ -1388,14 +1414,13 @@ public class FloatService extends Service {
                 String oldText = ShizukuAccessibilityService.lastScreenText;
                 Log.d(TAG, "=== READ_SCREEN === 请求捕获 旧数据 text=" + (oldText != null ? oldText.substring(0, Math.min(100, oldText.length())) : "null") + " struct=" + (oldStructure != null ? oldStructure.substring(0, Math.min(100, oldStructure.length())) : "null"));
                 ShizukuAccessibilityService.requestDetailedScreenCapture();
-                // 最多等 1.5s，每 300ms 检查一次数据是否刷新
+                // 最多等 1.5s，每 300ms 检查结构是否刷新（text 可能因事件驱动提前更新，只看结构）
                 int waited = 0;
                 for (int retry = 0; retry < 5; retry++) {
                     try { Thread.sleep(300); } catch (InterruptedException ignored) {}
                     waited += 300;
-                    if (!ShizukuAccessibilityService.lastScreenStructure.equals(oldStructure)
-                        || !ShizukuAccessibilityService.lastScreenText.equals(oldText)) {
-                        Log.d(TAG, "数据刷新完成，等待了" + waited + "ms");
+                    if (!ShizukuAccessibilityService.lastScreenStructure.equals(oldStructure)) {
+                        Log.d(TAG, "结构数据刷新完成，等待了" + waited + "ms");
                         break;
                     }
                 }
@@ -1465,10 +1490,12 @@ public class FloatService extends Service {
             }
             recallResult.append("\n\n🔄 点击规则：坐标直接用上面\"可见控件\"里的\"中点(x,y)\"，不要自己计算。如果目标按钮不在可见控件中，告知用户坐标不可用。");
 
+            restoreFloat();
             aiAgent.submitToolResult("read_screen", recallResult.toString(), aiCallback);
         } catch (Exception e) {
             Log.e(TAG, "readScreenContent 异常: " + e.getMessage());
             appendAIOutput("📱 读取失败");
+            restoreFloat();
             aiAgent.submitToolResult("read_screen", "[错误] " + e.getMessage(), aiCallback);
         }
     }
@@ -1704,6 +1731,9 @@ public class FloatService extends Service {
 
     /** 同步读屏（API 用） — 自动解决浮窗/SystemUI导致的包名覆盖 */
     private org.json.JSONObject readScreenSync() throws Exception {
+        // 缩球避免浮窗遮挡导致读屏不准
+        hideFloatIfShowing();
+
         // 用 dumpsys 解析真正的前台 App 包名
         // 解决：浮窗在前台 → currentPackage=com.shizuku.ai
         //       vivo bug → currentPackage=com.android.systemui
@@ -1729,8 +1759,7 @@ public class FloatService extends Service {
             ShizukuAccessibilityService.requestDetailedScreenCapture();
             for (int retry = 0; retry < 5; retry++) {
                 try { Thread.sleep(300); } catch (InterruptedException ignored) {}
-                if (!ShizukuAccessibilityService.lastScreenStructure.equals(oldStructure)
-                    || !ShizukuAccessibilityService.lastScreenText.equals(oldText)) break;
+                if (!ShizukuAccessibilityService.lastScreenStructure.equals(oldStructure)) break;
             }
         }
         org.json.JSONObject data = new org.json.JSONObject();
@@ -1745,6 +1774,7 @@ public class FloatService extends Service {
             while ((idx = struct.indexOf("中点(", idx)) != -1) { midCount++; idx += 3; }
         }
         data.put("midpointCount", midCount);
+        restoreFloat();
         return data;
     }
 
@@ -1778,6 +1808,8 @@ public class FloatService extends Service {
 
     /** 同步点击（API 用） */
     private org.json.JSONObject clickScreenSync(org.json.JSONObject params) throws Exception {
+        hideFloatIfShowing();
+
         String action = params.optString("action", "tap");
         String command;
         if ("back".equals(action)) {
@@ -1788,6 +1820,7 @@ public class FloatService extends Service {
             command = "input tap " + x + " " + y;
         }
         ShellResult sr = ShizukuShell.exec(command);
+        restoreFloat();
         org.json.JSONObject data = new org.json.JSONObject();
         data.put("action", action);
         data.put("command", command);
