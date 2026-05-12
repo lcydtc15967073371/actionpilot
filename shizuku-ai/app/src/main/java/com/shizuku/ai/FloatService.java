@@ -951,14 +951,15 @@ public class FloatService extends Service {
             aiAgent.submitToolResult("read_uimap", "（当前没有录制到任何操作数据，请先使用手机后再查询）", aiCallback);
             return;
         }
-        String exported = uiMapRecorder.exportForAI();
-        String goal = params != null ? params.optString("goal", "") : "";
-        String route = uiMapRecorder.suggestRoute(goal);
-        StringBuilder summary = new StringBuilder();
-        summary.append("UI 操作地图已生成，共 ").append(uiMapRecorder.getTotalActions()).append(" 条操作记录。\n").append(exported);
-        if (!route.isEmpty()) {
-            summary.append("\n").append(route);
+        String goal = params != null ? params.optString("goal", "").trim() : "";
+        String exported;
+        if (goal.isEmpty()) {
+            exported = uiMapRecorder.exportSummaryForAI();
+        } else {
+            exported = uiMapRecorder.exportFilteredForAI(goal);
         }
+        StringBuilder summary = new StringBuilder();
+        summary.append("UI 操作地图，共 ").append(uiMapRecorder.getTotalActions()).append(" 条操作记录。\n").append(exported);
         String result = summary.toString();
         appendAIOutput("🗺️ " + result.substring(0, Math.min(result.length(), 500)));
         aiAgent.submitToolResult("read_uimap", result, aiCallback);
@@ -1847,17 +1848,14 @@ public class FloatService extends Service {
             uiMapRecorder.start();
             uiMapRecorder.stop();
         }
-        String goal = "";
-        if (query != null && query.startsWith("goal=")) {
-            goal = query.substring(5);
-        }
+        String goal = (query != null && query.startsWith("goal=")) ? query.substring(5).trim() : "";
         org.json.JSONObject data = new org.json.JSONObject();
         data.put("totalActions", uiMapRecorder.getTotalActions());
-        data.put("map", uiMapRecorder.exportForAI());
         data.put("recentApps", uiMapRecorder.getRecentAppsJson());
         if (!goal.isEmpty()) {
-            String route = uiMapRecorder.suggestRoute(goal);
-            if (!route.isEmpty()) data.put("suggestedRoute", route);
+            data.put("map", uiMapRecorder.exportFilteredForAI(goal));
+        } else {
+            data.put("map", uiMapRecorder.exportSummaryForAI());
         }
         return data;
     }

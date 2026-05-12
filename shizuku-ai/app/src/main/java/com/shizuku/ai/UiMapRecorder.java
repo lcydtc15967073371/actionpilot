@@ -103,9 +103,19 @@ public class UiMapRecorder {
         }
     }
 
-    /** 记录屏幕内容 */
+    /** 记录屏幕内容（自动去重：连续相同/包含的内容只存一次） */
     public void onScreenContent(String content) {
         if (!recording || content.isEmpty()) return;
+        // 如果上一条也是 SCREEN_CONTENT 且内容包含当前内容或反之，跳过（页面未实质性变化）
+        if (!actions.isEmpty()) {
+            UiAction last = actions.get(actions.size() - 1);
+            if ("SCREEN_CONTENT".equals(last.actionType)) {
+                String lastLabel = last.elementLabel;
+                if (content.contains(lastLabel) || lastLabel.contains(content)) {
+                    return; // 内容高度重叠，去重
+                }
+            }
+        }
         actions.add(new UiAction(currentId != null ? currentId : "", "SCREEN_CONTENT", content, "", System.currentTimeMillis()));
     }
 
@@ -158,14 +168,23 @@ public class UiMapRecorder {
             }
             root.put("flows", flows);
 
-            // 最近操作时间线
+            // 最近操作时间线（去重连续相似的 SCREEN_CONTENT，限制 50 条）
             JSONArray timeline = new JSONArray();
             int start = Math.max(0, actions.size() - 50);
+            String lastScreenContent = null;
             for (int i = start; i < actions.size(); i++) {
                 UiAction a = actions.get(i);
+                // SCREEN_CONTENT 去重
+                if ("SCREEN_CONTENT".equals(a.actionType)) {
+                    if (a.elementLabel.equals(lastScreenContent)) continue;
+                    lastScreenContent = a.elementLabel;
+                }
                 JSONObject act = new JSONObject();
                 act.put("type", a.actionType);
-                act.put("label", a.elementLabel.length() > 200 ? a.elementLabel.substring(0, 200) : a.elementLabel);
+                int maxLen = "SCREEN_CONTENT".equals(a.actionType) ? 120 : 200;
+                String label = a.elementLabel;
+                if (label.length() > maxLen) label = label.substring(0, maxLen);
+                act.put("label", label);
                 UiNode node = nodes.get(a.nodeId);
                 act.put("screen", node != null ? node.screenName : a.nodeId);
                 timeline.put(act);
@@ -178,7 +197,170 @@ public class UiMapRecorder {
         }
     }
 
-    /** 最近访问的 App 列表（去重） */
+    /** 轻量概览导出 —— 仅 app 列表+总数，无 flows/timeline */
+    public String exportSummaryForAI() {
+        try {
+            JSONObject root = new JSONObject();
+            root.put("type", "summary");
+            root.put("totalActions", totalActions);
+            root.put("recordingDuration", startedAt > 0 ? (System.currentTimeMillis() - startedAt) / 1000 : 0);
+
+            JSONArray apps = new JSONArray();
+            Map<String, JSONObject> byPkg = new LinkedHashMap<>();
+            for (UiNode node : nodes.values()) {
+                JSONObject existing = byPkg.get(node.appPackage);
+                if (existing == null) {
+                    JSONObject appObj = new JSONObject();
+                    appObj.put("package", node.appPackage);
+                    appObj.put("name", node.appName);
+                    appObj.put("screenCount", 1);
+                    appObj.put("visitCount", node.visitCount);
+                    byPkg.put(node.appPackage, appObj);
+                } else {
+                    existing.put("screenCount", existing.getInt("screenCount") + 1);
+                    existing.put("visitCount", existing.getInt("visitCount") + node.visitCount);
+                }
+            }
+            for (JSONObject app : byPkg.values()) {
+                apps.put(app);
+            }
+            root.put("apps", apps);
+
+            return root.toString(2);
+        } catch (Exception e) {
+            return "{\"error\":\"导出失败: " + e.getMessage() + "\"}";
+        }
+    }
+
+    /** 基于 goal 关键词过滤导出 —— 只返回匹配的 nodes/edges/timeline */
+    public String exportFilteredForAI(String goal) {
+        try {
+            if (goal == null || goal.trim().isEmpty()) {
+                return exportForAI();
+            }
+
+            String goalLower = goal.toLowerCase().trim();
+
+            // 1. 过滤节点：包名/应用名/屏幕名任一匹配关键词
+            Map<String, UiNode> filteredNodes = new LinkedHashMap<>();
+            for (UiNode node : nodes.values()) {
+                if (matches(node, goalLower)) {
+                    filteredNodes.put(node.id, node);
+                }
+            }
+
+            // 2. 过滤动作：elementLabel 匹配关键词（同时收集涉及到的 nodeId）
+            //    去重：连续相同的 SCREEN_CONTENT 只保留最后一条
+            Map<String, UiNode> actionNodes = new LinkedHashMap<>();
+            List<UiAction> matchingActions = new ArrayList<>();
+            String lastScreenContent = null;
+            for (UiAction a : actions) {
+                if (a.elementLabel.toLowerCase().contains(goalLower)
+                        || a.nodeId.toLowerCase().contains(goalLower)) {
+                    // SCREEN_CONTENT 去重：内容相同的跳过
+                    if ("SCREEN_CONTENT".equals(a.actionType)) {
+                        if (a.elementLabel.equals(lastScreenContent)) continue;
+                        lastScreenContent = a.elementLabel;
+                    }
+                    matchingActions.add(a);
+                    UiNode n = nodes.get(a.nodeId);
+                    if (n != null) actionNodes.put(a.nodeId, n);
+                }
+            }
+
+            // 合并节点：显式匹配的 + 动作涉及的
+            filteredNodes.putAll(actionNodes);
+
+            if (filteredNodes.isEmpty() && matchingActions.isEmpty()) {
+                return "{\"message\":\"未找到与「" + goal + "」相关的操作记录\",\"totalActions\":" + totalActions + "}";
+            }
+
+            // 3. 过滤跳转边：两端都在匹配节点中，或 label 匹配关键词（避免拉入无关枢纽节点）
+            List<UiEdge> filteredEdges = new ArrayList<>();
+            for (UiEdge edge : edges) {
+                if (edge.elementLabel.toLowerCase().contains(goalLower)) {
+                    filteredEdges.add(edge);
+                } else if (filteredNodes.containsKey(edge.fromId) && filteredNodes.containsKey(edge.toId)) {
+                    // 两端都在匹配节点中才保留，避免枢纽节点（桌面/交互池）拉入大量无关边
+                    filteredEdges.add(edge);
+                }
+            }
+
+            // 4. 截取动作：最多 10 条
+            int start = Math.max(0, matchingActions.size() - 10);
+            List<UiAction> trimmedActions = matchingActions.subList(start, matchingActions.size());
+
+            // 5. 组装 JSON（与 exportForAI 结构一致）
+            JSONObject root = new JSONObject();
+            root.put("type", "search_result");
+            root.put("query", goal);
+            root.put("totalActions", totalActions);
+            root.put("matchedActions", matchingActions.size());
+
+            // Apps
+            JSONObject apps = new JSONObject();
+            Map<String, JSONArray> byPkg = new LinkedHashMap<>();
+            for (UiNode node : filteredNodes.values()) {
+                JSONArray arr = byPkg.computeIfAbsent(node.appPackage, k -> new JSONArray());
+                JSONObject n = new JSONObject();
+                n.put("screen", node.screenName);
+                n.put("visits", node.visitCount);
+                arr.put(n);
+            }
+            for (Map.Entry<String, JSONArray> e : byPkg.entrySet()) {
+                String pkg = e.getKey();
+                UiNode sample = null;
+                for (UiNode n : filteredNodes.values()) {
+                    if (n.appPackage.equals(pkg)) { sample = n; break; }
+                }
+                JSONObject appObj = new JSONObject();
+                appObj.put("name", sample != null ? sample.appName : pkg);
+                appObj.put("screens", e.getValue());
+                apps.put(pkg, appObj);
+            }
+            root.put("apps", apps);
+
+            // Flows
+            JSONArray flows = new JSONArray();
+            for (UiEdge edge : filteredEdges) {
+                JSONObject f = new JSONObject();
+                UiNode from = nodes.get(edge.fromId);
+                UiNode to = nodes.get(edge.toId);
+                f.put("from", from != null ? from.screenName : edge.fromId);
+                f.put("trigger", edge.elementLabel);
+                f.put("to", to != null ? to.screenName : edge.toId);
+                f.put("count", edge.count);
+                flows.put(f);
+            }
+            root.put("flows", flows);
+
+            // Timeline
+            JSONArray timeline = new JSONArray();
+            for (UiAction a : trimmedActions) {
+                JSONObject act = new JSONObject();
+                act.put("type", a.actionType);
+                // SCREEN_CONTENT 日志更长，压缩到 120 字符
+                int maxLen = "SCREEN_CONTENT".equals(a.actionType) ? 120 : 200;
+                String label = a.elementLabel;
+                if (label.length() > maxLen) label = label.substring(0, maxLen);
+                act.put("label", label);
+                UiNode node = nodes.get(a.nodeId);
+                act.put("screen", node != null ? node.screenName : a.nodeId);
+                timeline.put(act);
+            }
+            root.put("timeline", timeline);
+
+            return root.toString(2);
+        } catch (Exception e) {
+            return "{\"error\":\"搜索导出失败: " + e.getMessage() + "\"}";
+        }
+    }
+
+    private boolean matches(UiNode node, String goalLower) {
+        return node.appPackage.toLowerCase().contains(goalLower)
+            || node.appName.toLowerCase().contains(goalLower)
+            || node.screenName.toLowerCase().contains(goalLower);
+    }
     public String getRecentAppsJson() {
         try {
             JSONArray arr = new JSONArray();

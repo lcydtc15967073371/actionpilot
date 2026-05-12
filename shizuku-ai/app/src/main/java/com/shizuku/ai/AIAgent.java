@@ -17,6 +17,8 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.text.SimpleDateFormat;
+import java.util.Date;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -53,12 +55,12 @@ public class AIAgent {
         "5. start_app | 打开应用 | params: {\"package\": \"\"}\n" +
         "6. list_apps | 列出应用 | params: {\"keyword\": \"\"}\n" +
         "7. toggle_flashlight | 手电筒开关 | params: {}\n" +
-        "8. set_alarm | 设闹钟 | params: {\"hour\": 0, \"minutes\": 0, \"message\": \"\"}\n" +
+        "8. set_alarm | 设闹钟。hour 为 0-23（24 小时制），注意当前时间判断 AM/PM。例：下午 1:45 = hour=13, minutes=45 | params: {\"hour\": 0, \"minutes\": 0, \"message\": \"\"}\n" +
         "9. execute_shell | 执行Shell命令 | params: {\"command\": \"\"}\n" +
         "10. execute_intent | 执行Intent | params: {\"action\": \"\", \"extras\": {...}}\n" +
         "11. learn | 记住经验 | params: {\"key\": \"\", \"value\": \"\"}\n" +
         "12. get_device_info | 设备信息 | params: {}\n" +
-        "13. read_uimap | 读UI操作历史地图，传 goal 参数说明需求，系统会结合地图给出路线建议 | params: {\"goal\": \"\"}" +
+        "13. read_uimap | 读UI操作历史地图。传 goal 参数搜索相关内容（如\"设置闹钟\"\"打开手电筒\"），系统会自动过滤出相关 App 和操作路径。不传 goal 时返回轻量概览。 | params: {\"goal\": \"要搜索的关键词\"}\n" +
         "14. create_note | 创建原子笔记 | params: {\"content\": \"\", \"title\": \"\"}\n" +
         "15. click_screen | 点击屏幕（坐标直接用 read_screen 里\"可见控件\"的\"中点\"，不要自己算） | params: {\"action\": \"tap\", \"x\": 0, \"y\": 0} 或 {\"action\": \"back\"}";
 
@@ -221,6 +223,7 @@ public class AIAgent {
         // 构建系统消息：工具说明书 + 记忆
         StringBuilder sysContent = new StringBuilder();
         sysContent.append("你是一个Android手机助手，通过Shizuku获取系统权限执行操作。\n\n");
+        sysContent.append("当前时间: ").append(new SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.CHINA).format(new Date())).append("\n\n");
         sysContent.append(TOOL_MANIFEST);
         if (!memory.isEmpty()) {
             sysContent.append("\n\n你记住的经验：\n");
